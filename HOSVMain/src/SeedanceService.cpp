@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -112,19 +113,43 @@ VideoGenerationResult SeedanceService::wait(const std::string& task_id,
     options.max_interval = std::chrono::milliseconds(15000);
     options.timeout = std::chrono::milliseconds(900000);
 
-    if (stop.stop_requested()) {
-        throw std::runtime_error("Cancelled");
-    }
+    auto delay = options.initial_interval;
+    const auto deadline = std::chrono::steady_clock::now() + options.timeout;
+    while (!stop.stop_requested()) {
+        auto status = provider_->getTask(task_id);
+        if (!status.ok && status.result.error_message.empty()) {
+            status.result.error_message = status.result.error_code;
+        }
+        if (on_progress) {
+            on_progress(status.result);
+        }
+        if (is_terminal(status.result.status) || (!status.ok && !status.result.retryable)) {
+            return status.result;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            VideoGenerationResult timeout;
+            timeout.task_id = task_id;
+            timeout.status = VideoTaskStatus::Timeout;
+            timeout.error_code = "polling_timeout";
+            timeout.error_message = "polling timed out";
+            timeout.retryable = true;
+            if (on_progress) {
+                on_progress(timeout);
+            }
+            return timeout;
+        }
 
-    auto status = provider_->waitTask(task_id, options);
-    if (on_progress) {
-        on_progress(status.result);
+        auto sleep_remaining = std::min(delay, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()));
+        const auto chunk = std::chrono::milliseconds(100);
+        while (sleep_remaining > std::chrono::milliseconds(0)) {
+            if (stop.stop_requested()) {
+                throw std::runtime_error("Cancelled");
+            }
+            const auto nap = std::min(chunk, sleep_remaining);
+            std::this_thread::sleep_for(nap);
+            sleep_remaining -= nap;
+        }
+        delay = std::min(delay * 2, options.max_interval);
     }
-    if (stop.stop_requested()) {
-        throw std::runtime_error("Cancelled");
-    }
-    if (!status.ok && status.result.error_message.empty()) {
-        status.result.error_message = status.result.error_code;
-    }
-    return status.result;
+    throw std::runtime_error("Cancelled");
 }

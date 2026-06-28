@@ -259,7 +259,7 @@ void JobController::run_generate(SceneInput snapshot, std::stop_token st) {
 
         set_phase(JobPhase::Polling, "Polling task status (" + task.id + ")...");
 
-        auto complete = service_->wait(task.id, std::chrono::milliseconds(5000), st, [this](const VideoGenerationResult& t) {
+        auto complete = service_->wait(task.id, std::chrono::milliseconds(3000), st, [this](const VideoGenerationResult& t) {
             update_status(task_summary(t));
         });
 
