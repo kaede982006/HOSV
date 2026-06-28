@@ -1,5 +1,6 @@
 #include "JobController.hpp"
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -129,6 +130,12 @@ std::string task_summary(const VideoGenerationResult& task) {
 std::string output_summary(const VideoGenerationResult& task) {
     return task.video_url;
 }
+
+void apply_api_key_from_input(const SceneInput& input) {
+    if (!input.api_key.empty()) {
+        setenv("BYTEPLUS_ARK_API_KEY", input.api_key.c_str(), 1);
+    }
+}
 }
 
 JobController::JobController(std::shared_ptr<SeedanceService> service, std::shared_ptr<AppState> model, std::shared_ptr<std::recursive_mutex> mutex)
@@ -193,10 +200,15 @@ void JobController::fail(const std::string& msg) {
 void JobController::cancel() {
     if (model_->worker && model_->worker->joinable()) {
         set_phase(JobPhase::Cancelling, "Cancelling job...");
+        const auto task_id = current_task_id();
+        if (!task_id.empty()) {
+            cancel_remote_task(task_id);
+        }
         model_->worker->request_stop();
         model_->worker->join();
         model_->worker.reset();
     }
+    clear_current_task_id();
 }
 
 void JobController::start_generate(SceneInput snapshot) {
@@ -233,10 +245,17 @@ void JobController::run_generate(SceneInput snapshot, std::stop_token st) {
     try {
         if (st.stop_requested()) { set_cancelled(); return; }
 
+        apply_api_key_from_input(snapshot);
         set_phase(JobPhase::Submitting, "Submitting generation request...");
         auto task = service_->submit_text(snapshot);
+        set_current_task_id(task.id);
 
-        if (st.stop_requested()) { set_cancelled(); return; }
+        if (st.stop_requested()) {
+            cancel_remote_task(task.id);
+            set_cancelled();
+            clear_current_task_id();
+            return;
+        }
 
         set_phase(JobPhase::Polling, "Polling task status (" + task.id + ")...");
 
@@ -274,6 +293,7 @@ void JobController::run_generate(SceneInput snapshot, std::stop_token st) {
         if (st.stop_requested()) { set_cancelled(); return; }
         fail(std::string("Error: ") + e.what());
     }
+    clear_current_task_id();
     mark_idle();
 }
 
@@ -281,6 +301,7 @@ void JobController::run_lookup(SceneInput snapshot, std::stop_token st) {
     try {
         if (st.stop_requested()) { set_cancelled(); return; }
 
+        apply_api_key_from_input(snapshot);
         set_phase(JobPhase::Submitting, "Checking task status...");
         auto task = service_->lookup(snapshot.task_id_lookup);
 
@@ -315,4 +336,30 @@ void JobController::run_lookup(SceneInput snapshot, std::stop_token st) {
         fail(std::string("Error: ") + e.what());
     }
     mark_idle();
+}
+
+void JobController::set_current_task_id(const std::string& task_id) {
+    std::lock_guard<std::recursive_mutex> lock(*mutex_);
+    current_task_id_ = task_id;
+}
+
+std::string JobController::current_task_id() const {
+    std::lock_guard<std::recursive_mutex> lock(*mutex_);
+    return current_task_id_;
+}
+
+void JobController::clear_current_task_id() {
+    std::lock_guard<std::recursive_mutex> lock(*mutex_);
+    current_task_id_.clear();
+}
+
+void JobController::cancel_remote_task(const std::string& task_id) {
+    if (task_id.empty()) {
+        return;
+    }
+    try {
+        service_->cancel(task_id);
+    } catch (const std::exception& e) {
+        log_error("Remote cancel failed for task " + task_id + ": " + e.what());
+    }
 }

@@ -95,30 +95,36 @@ VideoGenerationResult SeedanceService::lookup(const std::string& task_id) {
     return result.result;
 }
 
+VideoGenerationResult SeedanceService::cancel(const std::string& task_id) {
+    auto result = provider_->cancelTask(task_id);
+    if (!result.ok && result.result.error_message.empty()) {
+        result.result.error_message = result.result.error_code;
+    }
+    return result.result;
+}
+
 VideoGenerationResult SeedanceService::wait(const std::string& task_id,
                                            std::chrono::milliseconds interval,
                                            std::stop_token stop,
                                            std::function<void(const VideoGenerationResult&)> on_progress) {
     PollOptions options;
     options.initial_interval = interval;
-    while (!stop.stop_requested()) {
-        auto result = provider_->getTask(task_id).result;
-        if (on_progress) {
-            on_progress(result);
-        }
-        if (is_terminal(result.status)) {
-            return result;
-        }
-        auto sleep_remaining = interval;
-        const auto chunk = std::chrono::milliseconds(100);
-        while (sleep_remaining > std::chrono::milliseconds(0)) {
-            if (stop.stop_requested()) {
-                throw std::runtime_error("Cancelled");
-            }
-            const auto nap = std::min(chunk, sleep_remaining);
-            std::this_thread::sleep_for(nap);
-            sleep_remaining -= nap;
-        }
+    options.max_interval = std::chrono::milliseconds(15000);
+    options.timeout = std::chrono::milliseconds(900000);
+
+    if (stop.stop_requested()) {
+        throw std::runtime_error("Cancelled");
     }
-    throw std::runtime_error("Cancelled");
+
+    auto status = provider_->waitTask(task_id, options);
+    if (on_progress) {
+        on_progress(status.result);
+    }
+    if (stop.stop_requested()) {
+        throw std::runtime_error("Cancelled");
+    }
+    if (!status.ok && status.result.error_message.empty()) {
+        status.result.error_message = status.result.error_code;
+    }
+    return status.result;
 }

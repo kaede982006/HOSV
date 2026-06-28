@@ -25,8 +25,13 @@ private:
     void mark_idle();
     void set_cancelled();
     void fail(const std::string& msg);
+    void set_current_task_id(const std::string& task_id);
+    std::string current_task_id() const;
+    void clear_current_task_id();
+    void cancel_remote_task(const std::string& task_id);
 
     std::shared_ptr<SeedanceService> service_;
     std::shared_ptr<AppState> model_;
     std::shared_ptr<std::recursive_mutex> mutex_;
+    std::string current_task_id_;
 };
