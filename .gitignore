@@ -9,7 +9,7 @@ dist/
 *.m4v
 *.tmp
 *.part
-arkbridge
+/arkbridge
 arkbridge.log
 *.arkbridge.log
 credentials.json
