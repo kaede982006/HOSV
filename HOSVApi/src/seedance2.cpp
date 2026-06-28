@@ -276,17 +276,55 @@ std::string reference_request_body(const ReferenceToVideoRequest& request) {
     return body.dump();
 }
 
-struct HttpResponse {
-    long status = 0;
-    std::string body;
-};
-
 std::size_t write_body(char* ptr, std::size_t size, std::size_t nmemb, void* userdata) {
     auto* body = static_cast<std::string*>(userdata);
     const std::size_t bytes = size * nmemb;
     body->append(ptr, bytes);
     return bytes;
 }
+
+class CurlTransport final : public IHttpTransport {
+public:
+    HttpResponse perform(const HttpRequest& request) const override {
+        CURL* curl = curl_easy_init();
+        if (!curl) throw std::runtime_error("curl_easy_init failed");
+
+        std::string response_body;
+        struct curl_slist* headers = nullptr;
+        for (const auto& kv : request.headers) {
+            std::string header = kv.first + ": " + kv.second;
+            headers = curl_slist_append(headers, header.c_str());
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, request.url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(request.connect_timeout.count()));
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(request.request_timeout.count()));
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+        if (request.method == "POST") {
+            curl_easy_setopt(curl, CURLOPT_POST, 1L);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request.body.c_str());
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(request.body.size()));
+        } else if (request.method != "GET") {
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, request.method.c_str());
+        }
+
+        CURLcode rc = curl_easy_perform(curl);
+        long status = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (rc != CURLE_OK) {
+            throw std::runtime_error(curl_easy_strerror(rc));
+        }
+
+        return HttpResponse{status, std::move(response_body)};
+    }
+};
 
 bool valid_url_like(const std::string& value) {
     return value.rfind("http://", 0) == 0 || value.rfind("https://", 0) == 0;
@@ -432,61 +470,36 @@ struct Client::Impl {
             return static_cast<int>(curl_global_init(CURL_GLOBAL_DEFAULT));
         }();
         if (curl_initialized != 0) throw std::runtime_error("curl_global_init failed");
+        if (!options.transport) {
+            options.transport = std::make_shared<CurlTransport>();
+        }
     }
 
     ~Impl() = default;
 
     HttpResponse request(const std::string& method, const std::string& path, const std::string& body = {}) const {
-        CURL* curl = curl_easy_init();
-        if (!curl) throw std::runtime_error("curl_easy_init failed");
-
-        std::string response_body;
-        struct curl_slist* headers = nullptr;
-        std::string auth = "Authorization: Bearer " + options.api_key;
-        headers = curl_slist_append(headers, auth.c_str());
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-        headers = curl_slist_append(headers, "Accept: application/json");
+        HttpRequest request;
+        request.method = method;
+        request.url = options.http.base_url + path;
+        request.body = body;
+        request.connect_timeout = options.http.connect_timeout;
+        request.request_timeout = options.http.request_timeout;
+        request.headers["Authorization"] = "Bearer " + options.api_key;
+        request.headers["Content-Type"] = "application/json";
+        request.headers["Accept"] = "application/json";
         for (const auto& kv : options.http.extra_headers) {
-            std::string header = kv.first + ": " + kv.second;
-            headers = curl_slist_append(headers, header.c_str());
+            request.headers[kv.first] = kv.second;
         }
 
-        std::string url = options.http.base_url + path;
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(options.http.connect_timeout.count()));
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(options.http.request_timeout.count()));
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        if (method == "POST") {
-            curl_easy_setopt(curl, CURLOPT_POST, 1L);
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-        } else if (method != "GET") {
-            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
-        }
-
-        CURLcode rc = curl_easy_perform(curl);
-        long status = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
-
-        if (rc != CURLE_OK) {
-            throw std::runtime_error(curl_easy_strerror(rc));
-        }
-
-        HttpResponse response{status, std::move(response_body)};
-        if (status < 200 || status >= 300) {
+        HttpResponse response = options.transport->perform(request);
+        if (response.status < 200 || response.status >= 300) {
             ErrorInfo error;
             try {
                 error = parse_error_info(json::parse(response.body));
             } catch (...) {
                 error.message = response.body;
             }
-            throw ApiException(static_cast<int>(status), std::move(error), response.body);
+            throw ApiException(static_cast<int>(response.status), std::move(error), response.body);
         }
         return response;
     }
@@ -544,13 +557,25 @@ GenerationTask Client::wait_for_task(
     ProgressCallback on_progress) const {
     const auto start = std::chrono::steady_clock::now();
     while (true) {
+        if (options.should_stop && options.should_stop()) {
+            throw std::runtime_error("Seedance task wait cancelled");
+        }
         GenerationTask task = get_task(task_id);
         if (on_progress) on_progress(task);
         if (is_terminal(task.status)) return task;
         if (options.timeout.count() > 0 && std::chrono::steady_clock::now() - start >= options.timeout) {
             throw std::runtime_error("Timed out waiting for Seedance task");
         }
-        std::this_thread::sleep_for(options.interval);
+        auto remaining = options.interval;
+        const auto chunk = std::chrono::milliseconds(100);
+        while (remaining > std::chrono::milliseconds(0)) {
+            if (options.should_stop && options.should_stop()) {
+                throw std::runtime_error("Seedance task wait cancelled");
+            }
+            const auto nap = std::min(chunk, remaining);
+            std::this_thread::sleep_for(nap);
+            remaining -= nap;
+        }
     }
 }
 

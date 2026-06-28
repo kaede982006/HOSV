@@ -125,7 +125,7 @@ struct SceneInput {
     std::string prompt;
     std::string save_path;
     std::string task_id_lookup;
-    std::vector<fs::path> local_images;
+    std::vector<std::string> reference_urls;
     int model_index = 0;
     int resolution_index = 1;
     int aspect_index = 0;
@@ -142,7 +142,7 @@ struct AppState {
     std::vector<Field> fields;
     std::vector<Button> buttons;
     std::vector<FileEntry> file_entries;
-    std::vector<std::string> local_images;
+    std::vector<std::string> reference_urls;
     int focus = 1;
     bool cursor_blink_on = true;
     int model = 0;
@@ -152,7 +152,7 @@ struct AppState {
     bool audio = true;
     bool watermark = false;
     std::string task_id;
-    std::string status = "Ready. Compose a scene, attach references, then render through HOSVApi.";
+    std::string status = "Ready. Compose a scene, paste remote reference URLs, then render through BytePlus ModelArk.";
     std::string output;
     std::string file_browser_dir;
     int file_page = 0;

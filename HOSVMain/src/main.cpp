@@ -1,7 +1,7 @@
-#include "seedance2/seedance2.hpp"
 #include "AppModel.hpp"
 #include "SeedanceService.hpp"
 #include "JobController.hpp"
+#include "providers/BytePlusArkVideoProvider.hpp"
 
 #include <algorithm>
 #include <array>
@@ -151,15 +151,7 @@ void log_error(const std::string& message) {
 }
 
 void log_exception(const std::exception& e, const std::string& context) {
-    if (const auto* api_err = dynamic_cast<const seedance2::ApiException*>(&e)) {
-        std::ostringstream os;
-        os << "ApiException in " << context << ": http_status=" << api_err->http_status
-           << ", error_code=" << api_err->error.code << ", message=" << api_err->error.message
-           << ", body=" << api_err->response_body;
-        log_error(os.str());
-    } else {
-        log_error("Exception in " + context + ": " + e.what());
-    }
+    log_error("Exception in " + context + ": " + e.what());
 }
 
 size_t write_file_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -881,8 +873,12 @@ constexpr int BOTTOM_MARGIN = 28;
 } // namespace LayoutConsts
 
 namespace {
-std::vector<std::string> parse_reference_urls(const std::string& input) {
-    std::vector<std::string> urls;
+bool is_remote_reference_url(const std::string& value) {
+    return value.rfind("http://", 0) == 0 || value.rfind("https://", 0) == 0;
+}
+
+std::vector<std::string> split_reference_values(const std::string& input) {
+    std::vector<std::string> values;
     std::stringstream ss(input);
     std::string line;
     while (std::getline(ss, line)) {
@@ -891,8 +887,21 @@ std::vector<std::string> parse_reference_urls(const std::string& input) {
         while (std::getline(line_ss, segment, ',')) {
             segment = trim_spaces(segment);
             if (!segment.empty()) {
-                urls.push_back(segment);
+                values.push_back(segment);
             }
+        }
+    }
+    return values;
+}
+
+std::vector<std::string> parse_reference_urls(const std::string& input) {
+    std::vector<std::string> urls;
+    for (const auto& value : split_reference_values(input)) {
+        if (!is_remote_reference_url(value)) {
+            throw std::invalid_argument("Reference inputs must be remote http:// or https:// URLs. Local files are not uploaded by HOSV yet.");
+        }
+        if (std::find(urls.begin(), urls.end(), value) == urls.end()) {
+            urls.push_back(value);
         }
     }
     return urls;
@@ -1319,12 +1328,12 @@ bool is_hidden_entry_name(const std::string& name) {
     return !name.empty() && name.front() == '.';
 }
 
-std::string local_references_display(const std::vector<std::string>& paths) {
-    if (paths.empty()) return {};
+std::string reference_urls_display(const std::vector<std::string>& urls) {
+    if (urls.empty()) return {};
     std::ostringstream out;
-    for (std::size_t i = 0; i < paths.size(); ++i) {
+    for (std::size_t i = 0; i < urls.size(); ++i) {
         if (i > 0) out << ", ";
-        out << fs::path(paths[i]).filename().string();
+        out << urls[i];
     }
     return out.str();
 }
@@ -1416,10 +1425,7 @@ void file_browser_activate_selection(AppState& app) {
         return;
     }
 
-    app.local_images.push_back(entry.path);
-    app.fields[2].value = local_references_display(app.local_images);
-    app.fields[2].cursor = static_cast<int>(app.fields[2].value.size());
-    app.status = "Attached local reference: " + fs::path(entry.path).filename().string();
+    app.status = "Local image files are not uploaded yet. Paste an http:// or https:// image URL instead.";
     app.file_browser_open = false;
 }
 
@@ -1485,27 +1491,6 @@ const char* aspect_label(int value) {
     return labels[std::max(0, std::min(6, value))];
 }
 
-seedance2::Resolution resolution_value(int value) {
-    switch (value) {
-        case 0: return seedance2::Resolution::R480p;
-        case 2: return seedance2::Resolution::R1080p;
-        case 3: return seedance2::Resolution::R4k;
-        default: return seedance2::Resolution::R720p;
-    }
-}
-
-seedance2::AspectRatio aspect_value(int value) {
-    switch (value) {
-        case 1: return seedance2::AspectRatio::Ratio9x16;
-        case 2: return seedance2::AspectRatio::Ratio1x1;
-        case 3: return seedance2::AspectRatio::Ratio4x3;
-        case 4: return seedance2::AspectRatio::Ratio3x4;
-        case 5: return seedance2::AspectRatio::Ratio21x9;
-        case 6: return seedance2::AspectRatio::Adaptive;
-        default: return seedance2::AspectRatio::Ratio16x9;
-    }
-}
-
 int estimate_text_width(const std::string& text, int char_width = 7) {
     return static_cast<int>(text.size()) * char_width;
 }
@@ -1537,7 +1522,7 @@ void layout_render_controls(AppState& app, Layout& L, int panel_x, int panel_y, 
 
     rc.metadata_y = row2_y + LayoutConsts::BUTTON_H + LayoutConsts::METADATA_TOP_GAP;
     const int metadata_baseline = rc.metadata_y + LayoutConsts::FIELD_LABEL_GAP;
-    constexpr const char* attached_label = "Attached local references";
+    constexpr const char* attached_label = "Reference URLs";
 
     rc.attached_label_x = control_x;
     rc.attached_label_y = metadata_baseline;
@@ -1616,7 +1601,7 @@ void set_layout(AppState& app) {
     app.buttons.resize(11);
     layout_render_controls(app, L, comp_x, render_y, comp_w);
     L.render_panel.h = column_h - (render_y - L.side_y);
-    app.buttons[7] = {"Attach Image", {field_x + reference_w + gap, app.fields[2].rect.y, attach_w, LayoutConsts::REFERENCE_FIELD_H}};
+    app.buttons[7] = {"Use URL", {field_x + reference_w + gap, app.fields[2].rect.y, attach_w, LayoutConsts::REFERENCE_FIELD_H}};
     app.buttons[10] = {"Cancel", {field_x + reference_w + gap + attach_w + btn_gap, app.fields[2].rect.y, cancel_w, LayoutConsts::REFERENCE_FIELD_H}};
 
     L.studio_panel = {L.side_x, L.side_y, L.side_w, column_h};
@@ -1800,6 +1785,18 @@ int run_self_tests() {
     }
 
     {
+        const auto refs = parse_reference_urls("https://cdn.example/a.png, https://cdn.example/a.png\nhttp://cdn.example/b.mp4");
+        test.check(refs.size() == 2, "reference URL parser splits and deduplicates remote URLs", stderr);
+        bool rejected_local_path = false;
+        try {
+            (void)parse_reference_urls("/tmp/local.png");
+        } catch (const std::invalid_argument&) {
+            rejected_local_path = true;
+        }
+        test.check(rejected_local_path, "reference URL parser rejects local file paths", stderr);
+    }
+
+    {
         AppState app;
         app.fields.resize(5);
         const fs::path temp_dir = fs::temp_directory_path() / ("hosv-self-test-" + std::to_string(static_cast<long long>(getpid())));
@@ -1827,8 +1824,8 @@ int run_self_tests() {
         app.file_cursor = 0;
         load_file_entries(app);
         file_browser_activate_selection(app);
-        test.check(app.local_images.size() == 1, "file browser attaches selected image", stderr);
-        test.check(app.fields[2].value.find("visible.png") != std::string::npos, "local reference field displays selected image", stderr);
+        test.check(app.reference_urls.empty(), "file browser does not attach local image paths", stderr);
+        test.check(app.fields[2].value.empty(), "reference URL field ignores local file selection", stderr);
         test.check(!app.file_browser_open, "file browser closes after image selection", stderr);
 
         fs::remove_all(temp_dir, ec);
@@ -1837,8 +1834,10 @@ int run_self_tests() {
     {
         AppState app;
         app.fields.resize(5);
-        const bool has_key = std::getenv("SEEDANCE2_API_KEY") != nullptr;
-        if (const char* key = std::getenv("SEEDANCE2_API_KEY")) {
+        const bool has_key = std::getenv("BYTEPLUS_ARK_API_KEY") != nullptr || std::getenv("ARK_API_KEY") != nullptr;
+        if (const char* key = std::getenv("BYTEPLUS_ARK_API_KEY")) {
+            app.fields[0].value = key;
+        } else if (const char* key = std::getenv("ARK_API_KEY")) {
             app.fields[0].value = key;
         }
         test.check(has_key ? !app.fields[0].value.empty() : app.fields[0].value.empty(), "API key environment initializes API field", stderr);
@@ -1849,12 +1848,46 @@ int run_self_tests() {
         auto mutex_state = std::make_shared<std::recursive_mutex>();
         app_state->fields.resize(5);
         set_layout(*app_state);
-        app_state->local_images.push_back("test.png");
-        app_state->fields[2].value = local_references_display(app_state->local_images);
+        app_state->reference_urls.push_back("https://cdn.example/test.png");
+        app_state->fields[2].value = reference_urls_display(app_state->reference_urls);
 
         click_button(10, app_state, mutex_state);
-        test.check(app_state->local_images.empty(), "click cancel button clears local images", stderr);
+        test.check(app_state->reference_urls.empty(), "click cancel button clears reference URLs", stderr);
         test.check(app_state->fields[2].value.empty(), "click cancel button clears field value", stderr);
+    }
+
+    {
+        const char* old_byteplus = std::getenv("BYTEPLUS_ARK_API_KEY");
+        const char* old_ark = std::getenv("ARK_API_KEY");
+        std::string saved_byteplus = old_byteplus ? old_byteplus : "";
+        std::string saved_ark = old_ark ? old_ark : "";
+        unsetenv("BYTEPLUS_ARK_API_KEY");
+        unsetenv("ARK_API_KEY");
+
+        BytePlusArkVideoProvider provider;
+        VideoGenerationRequest request;
+        request.prompt = "self-test prompt";
+        const auto created = provider.createTask(request);
+        test.check(!created.ok, "BytePlus provider reports missing API key without real API call", stderr);
+        test.check(created.result.error_code == "missing_api_key", "BytePlus provider maps missing API key", stderr);
+
+        if (old_byteplus) setenv("BYTEPLUS_ARK_API_KEY", saved_byteplus.c_str(), 1);
+        if (old_ark) setenv("ARK_API_KEY", saved_ark.c_str(), 1);
+    }
+
+    {
+        const char* old_provider = std::getenv("HOSV_PROVIDER");
+        std::string saved_provider = old_provider ? old_provider : "";
+        setenv("HOSV_PROVIDER", "seedance2.ai", 1);
+        bool rejected = false;
+        try {
+            BytePlusArkVideoProvider provider;
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        test.check(rejected, "deprecated seedance2.ai provider is rejected", stderr);
+        if (old_provider) setenv("HOSV_PROVIDER", saved_provider.c_str(), 1);
+        else unsetenv("HOSV_PROVIDER");
     }
 
     std::fprintf(stderr, "[HOSV self-test] summary: %d passed, %d failed\n", test.passed, test.failed);
@@ -2461,9 +2494,9 @@ void draw_file_browser(X11& x11, AppState& app) {
     draw_box(x11, dialog, x11.accent, false);
 
     set_foreground(x11, x11.ink);
-    draw_string(x11, dialog.x + 18, dialog.y + 34, "Attach Image", FontRole::Title);
+    draw_string(x11, dialog.x + 18, dialog.y + 34, "Local Images Unsupported", FontRole::Title);
     set_foreground(x11, x11.muted);
-    draw_string(x11, dialog.x + 18, dialog.y + 60, "Choose a local reference image for this HOSV session.", FontRole::Small);
+    draw_string(x11, dialog.x + 18, dialog.y + 60, "Paste a hosted http:// or https:// image URL in the reference field.", FontRole::Small);
     draw_string(x11, dialog.x + dialog.w - 430, dialog.y + 60, "h parent  j/k move  l open  Ctrl+H hidden  Esc cancel", FontRole::Small);
 
     const Rect cancel_btn{dialog.x + dialog.w - 90, dialog.y + 16, 72, 28};
@@ -2515,7 +2548,7 @@ void redraw(X11& x11, AppState& app) {
     }
     draw_string(x11, L.title_x, L.title_y, "HOSV", FontRole::Title);
     set_foreground(x11, x11.muted);
-    draw_string(x11, L.tagline_x, L.tagline_y, "Human-led synthetic video studio powered by HOSVApi and Seedance 2.", FontRole::Small);
+    draw_string(x11, L.tagline_x, L.tagline_y, "Human-led synthetic video studio powered by official BytePlus ModelArk.", FontRole::Small);
 
     draw_panel(x11, L.composition_panel, "Composition", "Shape the source direction and reference inputs.");
     draw_panel(x11, L.render_panel, "Render Controls", "Tune generation parameters before launch.");
@@ -2546,7 +2579,7 @@ void redraw(X11& x11, AppState& app) {
         draw_field_frame(x11, field.rect, focused, field.readonly);
         if (field.readonly && field.value.empty()) {
             set_foreground(x11, x11.muted);
-            draw_string(x11, field.rect.x + 10, field_text_top(field), "Use Attach Image to select local references.", FontRole::Small);
+            draw_string(x11, field.rect.x + 10, field_text_top(field), "Paste one or more remote reference URLs.", FontRole::Small);
         } else {
             draw_box(x11, {field.rect.x + 1, field.rect.y + 1, field.rect.w - 2, field.rect.h - 2}, x11.surface, true);
             set_foreground(x11, field.readonly ? x11.muted : x11.ink);
@@ -2589,14 +2622,15 @@ void redraw(X11& x11, AppState& app) {
     options << "Duration: " << app.duration << " seconds";
     const auto& rc = L.render_controls;
     set_foreground(x11, x11.muted);
-    draw_string(x11, rc.attached_label_x, rc.attached_label_y, "Attached local references", FontRole::Label);
-    set_foreground(x11, app.local_images.empty() ? x11.muted : x11.warning);
-    if (app.local_images.empty()) {
-        draw_string(x11, rc.attached_value_x, rc.attached_value_y, "None selected.", FontRole::Body);
+    draw_string(x11, rc.attached_label_x, rc.attached_label_y, "Reference URLs", FontRole::Label);
+    const auto entered_refs = split_reference_values(app.fields.size() > 2 ? app.fields[2].value : std::string{});
+    set_foreground(x11, entered_refs.empty() ? x11.muted : x11.warning);
+    if (entered_refs.empty()) {
+        draw_string(x11, rc.attached_value_x, rc.attached_value_y, "None entered.", FontRole::Body);
     } else {
-        const auto last = fs::path(app.local_images.back()).filename().string();
+        const auto& last = entered_refs.back();
         std::ostringstream attached;
-        attached << app.local_images.size() << " selected, latest: " << last;
+        attached << entered_refs.size() << " entered, latest: " << (last.size() > 36 ? "..." + last.substr(last.size() - 33) : last);
         draw_string(x11, rc.attached_value_x, rc.attached_value_y, attached.str(), FontRole::Body);
     }
     set_foreground(x11, x11.ink);
@@ -2636,9 +2670,7 @@ SceneInput make_scene_input(const AppState& app) {
     input.task_id_lookup = trim_spaces(app.fields[4].value);
     
     std::vector<std::string> ref_urls = parse_reference_urls(app.fields[2].value);
-    for (const auto& url : ref_urls) {
-        input.local_images.push_back(fs::path(url));
-    }
+    input.reference_urls = std::move(ref_urls);
     
     input.model_index = app.model;
     input.resolution_index = app.resolution;
@@ -2646,6 +2678,13 @@ SceneInput make_scene_input(const AppState& app) {
     input.duration = app.duration;
     input.audio = app.audio;
     input.watermark = app.watermark;
+    return input;
+}
+
+SceneInput make_lookup_input(const AppState& app) {
+    SceneInput input;
+    input.api_key = trim_spaces(app.fields[0].value);
+    input.task_id_lookup = trim_spaces(app.fields[4].value);
     return input;
 }
 
@@ -2661,18 +2700,30 @@ void click_button(
     if (index == 4) app->duration = std::min(15, app->duration + 1);
     if (index == 5) app->audio = !app->audio;
     if (index == 6) app->watermark = !app->watermark;
-    if (index == 7) open_file_browser(*app);
+    if (index == 7) {
+        app->focus = 2;
+        app->fields[2].cursor = static_cast<int>(app->fields[2].value.size());
+        clear_selection(app->fields[2]);
+        app->status = "Paste remote http:// or https:// reference URLs. Local file upload is not supported yet.";
+    }
     if (index == 8) {
-        if (jobs) jobs->start_generate(make_scene_input(*app));
+        if (jobs) {
+            try {
+                jobs->start_generate(make_scene_input(*app));
+            } catch (const std::exception& error) {
+                app->has_error = true;
+                app->status = error.what();
+            }
+        }
     }
     if (index == 9) {
-        if (jobs) jobs->start_lookup(make_scene_input(*app));
+        if (jobs) jobs->start_lookup(make_lookup_input(*app));
     }
     if (index == 10) {
         if (app->busy && jobs) {
             jobs->cancel();
         } else {
-            app->local_images.clear();
+            app->reference_urls.clear();
             app->fields[2].value.clear();
             app->fields[2].cursor = 0;
             clear_selection(app->fields[2]);
@@ -2965,7 +3016,10 @@ int run_gui() {
         x11.XFlush(x11.display);
     };
 
-    if (const char* key = std::getenv("SEEDANCE2_API_KEY")) {
+    if (const char* key = std::getenv("BYTEPLUS_ARK_API_KEY")) {
+        app.fields.resize(5);
+        app.fields[0].value = key;
+    } else if (const char* key = std::getenv("ARK_API_KEY")) {
         app.fields.resize(5);
         app.fields[0].value = key;
     }
@@ -2987,8 +3041,8 @@ int run_gui() {
     auto mutex_state = std::make_shared<std::recursive_mutex>();
     std::recursive_mutex& mutex = *mutex_state;
 
-    auto transport = std::make_shared<AppStateTransport>(app_state);
-    auto service = std::make_shared<SeedanceService>(transport);
+    auto provider = std::make_shared<BytePlusArkVideoProvider>();
+    auto service = std::make_shared<SeedanceService>(provider);
     auto jobs = std::make_shared<JobController>(service, app_state, mutex_state);
 
     auto last_cursor_blink = std::chrono::steady_clock::now();
@@ -3098,6 +3152,28 @@ int run_gui() {
 } // namespace
 
 int main(int argc, char** argv) {
+    std::string provider = "byteplus-ark";
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h") {
+            std::printf("Usage: hosv [--provider byteplus-ark] [--self-test] [--dump-layout]\n");
+            return 0;
+        }
+        if (arg == "--provider" && i + 1 < argc) {
+            provider = argv[++i];
+            continue;
+        }
+    }
+    if (provider == "seedance2.ai" || provider == "api.seedance2.ai" || provider == "seedance2") {
+        std::fprintf(stderr, "The unofficial seedance2.ai provider has been disabled. Use the official BytePlus ModelArk provider.\n");
+        return 2;
+    }
+    if (provider != "byteplus-ark") {
+        std::fprintf(stderr, "Unsupported provider: %s\n", provider.c_str());
+        return 2;
+    }
+    setenv("HOSV_PROVIDER", provider.c_str(), 1);
+
     if (argc >= 2 && std::string(argv[1]) == "--self-test") {
         return run_self_tests();
     }

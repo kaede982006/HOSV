@@ -1,178 +1,124 @@
 #include "SeedanceService.hpp"
-#include <curl/curl.h>
-#include <stdexcept>
-#include <sstream>
-#include <thread>
+
 #include <algorithm>
-#include <cstdlib>
+#include <cctype>
+#include <stdexcept>
+#include <thread>
+#include <utility>
 
 namespace {
-size_t write_string_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    auto* s = static_cast<std::string*>(userdata);
-    s->append(ptr, size * nmemb);
-    return size * nmemb;
+std::string lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
 }
 
-seedance2::ClientOptions get_client_options(std::shared_ptr<IHttpTransport> transport) {
-    seedance2::ClientOptions opts;
-    opts.api_key = transport->get_api_key();
-    opts.http.base_url = "https://api.seedance2.ai";
-    if (const char* env_url = std::getenv("SEEDANCE2_API_URL")) {
-        opts.http.base_url = env_url;
+std::string url_path_without_query(std::string url) {
+    const auto query = url.find_first_of("?#");
+    if (query != std::string::npos) {
+        url.resize(query);
     }
-    return opts;
-}
+    return lower_copy(std::move(url));
 }
 
-CurlHttpTransport::CurlHttpTransport(const std::string& api_key, const std::string& base_url)
-    : api_key_(api_key), base_url_(base_url) {}
-
-std::string CurlHttpTransport::get_api_key() const { return api_key_; }
-
-std::string CurlHttpTransport::request(const std::string& method, const std::string& path, const std::string& body) {
-    CURL* curl = curl_easy_init();
-    if (!curl) throw std::runtime_error("Failed to init curl");
-
-    std::string response;
-    struct curl_slist* headers = nullptr;
-    std::string auth = "Authorization: Bearer " + api_key_;
-    headers = curl_slist_append(headers, auth.c_str());
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    headers = curl_slist_append(headers, "Accept: application/json");
-
-    std::string url = base_url_ + path;
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_string_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-    if (method == "POST") {
-        curl_easy_setopt(curl, CURLOPT_POST, 1L);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-    } else if (method != "GET") {
-        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
-    }
-
-    CURLcode res = curl_easy_perform(curl);
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK) {
-        throw std::runtime_error(curl_easy_strerror(res));
-    }
-
-    if (http_code < 200 || http_code >= 300) {
-        throw std::runtime_error("HTTP status " + std::to_string(http_code) + ": " + response);
-    }
-
-    return response;
+bool has_suffix(const std::string& value, const std::vector<std::string>& suffixes) {
+    return std::any_of(suffixes.begin(), suffixes.end(), [&](const std::string& suffix) {
+        return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+    });
 }
 
-AppStateTransport::AppStateTransport(std::shared_ptr<AppState> app)
-    : app_(app) {}
-
-std::string AppStateTransport::get_api_key() const {
-    return app_->fields[0].value;
+std::string resolution_from_index(int index) {
+    if (index == 0) return "480p";
+    if (index == 2) return "1080p";
+    if (index == 3) return "4k";
+    return "720p";
 }
 
-std::string AppStateTransport::request(const std::string& method, const std::string& path, const std::string& body) {
-    std::string base_url = "https://api.seedance2.ai";
-    if (const char* env_url = std::getenv("SEEDANCE2_API_URL")) {
-        base_url = env_url;
-    }
-    CurlHttpTransport curl_transport(get_api_key(), base_url);
-    return curl_transport.request(method, path, body);
+std::string ratio_from_index(int index) {
+    if (index == 1) return "9:16";
+    if (index == 2) return "1:1";
+    if (index == 3) return "4:3";
+    if (index == 4) return "3:4";
+    if (index == 5) return "21:9";
+    if (index == 6) return "adaptive";
+    return "16:9";
 }
 
-SeedanceService::SeedanceService(std::shared_ptr<IHttpTransport> transport)
-    : transport_(transport) {}
-
-seedance2::GenerationTask SeedanceService::submit_text(const SceneInput& input) {
-    auto opts = get_client_options(transport_);
-    seedance2::Client client(opts);
-
-    seedance2::GenerationOptions gen_opts;
-    gen_opts.model = input.model_index == 1 ? seedance2::VideoModel::Seedance20Fast : seedance2::VideoModel::Seedance20;
-    
-    if (input.resolution_index == 0) gen_opts.resolution = seedance2::Resolution::R480p;
-    else if (input.resolution_index == 1) gen_opts.resolution = seedance2::Resolution::R720p;
-    else if (input.resolution_index == 2) gen_opts.resolution = seedance2::Resolution::R1080p;
-    else gen_opts.resolution = seedance2::Resolution::R4k;
-
-    if (input.aspect_index == 0) gen_opts.aspect_ratio = seedance2::AspectRatio::Ratio16x9;
-    else if (input.aspect_index == 1) gen_opts.aspect_ratio = seedance2::AspectRatio::Ratio9x16;
-    else if (input.aspect_index == 2) gen_opts.aspect_ratio = seedance2::AspectRatio::Ratio1x1;
-    else if (input.aspect_index == 3) gen_opts.aspect_ratio = seedance2::AspectRatio::Ratio4x3;
-    else if (input.aspect_index == 4) gen_opts.aspect_ratio = seedance2::AspectRatio::Ratio3x4;
-    else if (input.aspect_index == 5) gen_opts.aspect_ratio = seedance2::AspectRatio::Ratio21x9;
-    else gen_opts.aspect_ratio = seedance2::AspectRatio::Adaptive;
-
-    gen_opts.duration_seconds = input.duration;
-    gen_opts.generate_audio = input.audio;
-    gen_opts.watermark = input.watermark;
-
-    std::vector<std::string> ref_urls;
-    for (const auto& p : input.local_images) {
-        ref_urls.push_back(p.string());
+void classify_refs(const std::vector<std::string>& refs, VideoGenerationRequest& request) {
+    for (const auto& url : refs) {
+        const auto path = url_path_without_query(url);
+        if (has_suffix(path, {".mp4", ".mov", ".webm", ".m4v"})) {
+            request.video_urls.push_back(url);
+        } else if (has_suffix(path, {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"})) {
+            request.audio_urls.push_back(url);
+        } else {
+            request.image_urls.push_back(url);
+        }
     }
-
-    if (ref_urls.empty()) {
-        seedance2::TextToVideoRequest request;
-        request.prompt = input.prompt;
-        request.options = gen_opts;
-        return client.create_text_to_video(request);
-    } else if (ref_urls.size() <= 2) {
-        seedance2::ImageToVideoRequest request;
-        request.prompt = input.prompt;
-        request.image_urls = ref_urls;
-        request.options = gen_opts;
-        return client.create_image_to_video(request);
+    if (!request.video_urls.empty() || !request.audio_urls.empty() || request.image_urls.size() > 2) {
+        request.mode = "reference_to_video";
+    } else if (!request.image_urls.empty()) {
+        request.mode = "image_to_video";
     } else {
-        seedance2::ReferenceToVideoRequest request;
-        request.prompt = input.prompt;
-        request.image_urls = ref_urls;
-        request.options = gen_opts;
-        return client.create_reference_to_video(request);
+        request.mode = "text_to_video";
     }
 }
-
-seedance2::GenerationTask SeedanceService::lookup(const std::string& task_id) {
-    auto opts = get_client_options(transport_);
-    seedance2::Client client(opts);
-    return client.get_task(task_id);
 }
 
-seedance2::GenerationTask SeedanceService::wait(const std::string& task_id,
-                                               std::chrono::milliseconds interval,
-                                               std::stop_token stop,
-                                               std::function<void(const seedance2::GenerationTask&)> on_progress) {
-    auto opts = get_client_options(transport_);
-    seedance2::Client client(opts);
+SeedanceService::SeedanceService(std::shared_ptr<IVideoProvider> provider)
+    : provider_(std::move(provider)) {}
 
-    while (true) {
-        if (stop.stop_requested()) {
-            throw std::runtime_error("Cancelled");
-        }
-        auto task = client.get_task(task_id);
+VideoGenerationTask SeedanceService::submit_text(const SceneInput& input) {
+    VideoGenerationRequest request;
+    request.prompt = input.prompt;
+    request.resolution = resolution_from_index(input.resolution_index);
+    request.ratio = ratio_from_index(input.aspect_index);
+    request.duration_seconds = input.duration;
+    request.fast_mode = input.model_index == 1;
+    request.watermark = input.watermark;
+    request.output_dir = input.save_path;
+    classify_refs(input.reference_urls, request);
+
+    auto created = provider_->createTask(request);
+    if (!created.ok) {
+        throw std::runtime_error(created.result.error_message.empty() ? created.result.error_code : created.result.error_message);
+    }
+    return created.task;
+}
+
+VideoGenerationResult SeedanceService::lookup(const std::string& task_id) {
+    auto result = provider_->getTask(task_id);
+    if (!result.ok && result.result.error_message.empty()) {
+        result.result.error_message = result.result.error_code;
+    }
+    return result.result;
+}
+
+VideoGenerationResult SeedanceService::wait(const std::string& task_id,
+                                           std::chrono::milliseconds interval,
+                                           std::stop_token stop,
+                                           std::function<void(const VideoGenerationResult&)> on_progress) {
+    PollOptions options;
+    options.initial_interval = interval;
+    while (!stop.stop_requested()) {
+        auto result = provider_->getTask(task_id).result;
         if (on_progress) {
-            on_progress(task);
+            on_progress(result);
         }
-        if (seedance2::is_terminal(task.status)) {
-            return task;
+        if (is_terminal(result.status)) {
+            return result;
         }
-
         auto sleep_remaining = interval;
-        auto chunk = std::chrono::milliseconds(100);
+        const auto chunk = std::chrono::milliseconds(100);
         while (sleep_remaining > std::chrono::milliseconds(0)) {
             if (stop.stop_requested()) {
                 throw std::runtime_error("Cancelled");
             }
-            std::this_thread::sleep_for(std::min(chunk, sleep_remaining));
-            sleep_remaining -= chunk;
+            const auto nap = std::min(chunk, sleep_remaining);
+            std::this_thread::sleep_for(nap);
+            sleep_remaining -= nap;
         }
     }
+    throw std::runtime_error("Cancelled");
 }

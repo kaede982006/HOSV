@@ -45,6 +45,10 @@ mkdir -p "${DIST_DIR}"
 rm -f "${DIST_DIR}/HOSVMain"
 cp "${BUILD_DIR}/hosv" "${DIST_DIR}/HOSV"
 chmod +x "${DIST_DIR}/HOSV"
+if [ -x "${BUILD_DIR}/arkbridge" ]; then
+    cp "${BUILD_DIR}/arkbridge" "${DIST_DIR}/arkbridge"
+    chmod +x "${DIST_DIR}/arkbridge"
+fi
 cp "${ROOT_DIR}/logo.png" "${DIST_DIR}/logo.png"
 rm -rf "${DIST_DIR}/fonts"
 cp -R "${ROOT_DIR}/fonts" "${DIST_DIR}/fonts"

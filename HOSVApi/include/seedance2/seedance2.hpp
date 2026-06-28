@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -76,15 +77,36 @@ struct SEEDANCE2_API ApiException : public std::runtime_error {
 };
 
 struct SEEDANCE2_API HttpOptions {
-    std::string base_url = "https://api.seedance2.ai";
+    std::string base_url = "legacy-seedance-provider-disabled";
     std::chrono::milliseconds connect_timeout{10000};
     std::chrono::milliseconds request_timeout{120000};
     std::map<std::string, std::string> extra_headers;
 };
 
+struct SEEDANCE2_API HttpRequest {
+    std::string method;
+    std::string url;
+    std::map<std::string, std::string> headers;
+    std::string body;
+    std::chrono::milliseconds connect_timeout{10000};
+    std::chrono::milliseconds request_timeout{120000};
+};
+
+struct SEEDANCE2_API HttpResponse {
+    long status = 0;
+    std::string body;
+};
+
+class SEEDANCE2_API IHttpTransport {
+public:
+    virtual ~IHttpTransport() = default;
+    virtual HttpResponse perform(const HttpRequest& request) const = 0;
+};
+
 struct SEEDANCE2_API ClientOptions {
     std::string api_key;
     HttpOptions http;
+    std::shared_ptr<IHttpTransport> transport;
 };
 
 struct SEEDANCE2_API GenerationOptions {
@@ -157,6 +179,7 @@ struct SEEDANCE2_API WebhookEvent {
 struct SEEDANCE2_API PollOptions {
     std::chrono::milliseconds interval{10000};
     std::chrono::milliseconds timeout{0};
+    std::function<bool()> should_stop;
 };
 
 using ProgressCallback = std::function<void(const GenerationTask&)>;

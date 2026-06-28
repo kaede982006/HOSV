@@ -2,8 +2,10 @@ cmake_minimum_required(VERSION 3.16)
 
 project(HOSV
     VERSION 0.1.0
-    DESCRIPTION "Native GUI application for AI video generation using HOSVApi"
+    DESCRIPTION "Native GUI application for AI video generation using BytePlus ModelArk"
     LANGUAGES CXX)
+
+option(HOSV_ENABLE_BYTEPLUS_ARK "Build the official BytePlus ModelArk Go bridge provider" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +13,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(HOSV_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(HOSV_API_DIR "${HOSV_ROOT}/HOSVApi")
+set(HOSV_ARKBRIDGE_DIR "${HOSV_ROOT}/tools/arkbridge")
 set(HOSV_LOGO "${HOSV_ROOT}/logo.png")
 
 set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
@@ -53,7 +56,8 @@ add_executable(hosv
     src/main.cpp
     src/SeedanceService.cpp
     src/JobController.cpp
-    "${HOSV_API_DIR}/src/seedance2.cpp")
+    src/providers/BridgeProcessRunner.cpp
+    src/providers/BytePlusArkVideoProvider.cpp)
 
 target_include_directories(hosv PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -73,6 +77,38 @@ target_link_libraries(hosv PRIVATE
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(hosv PRIVATE -Wall -Wextra -Wpedantic)
     target_link_options(hosv PRIVATE -static-libgcc -static-libstdc++)
+endif()
+
+if(HOSV_ENABLE_BYTEPLUS_ARK)
+    find_program(GO_EXECUTABLE go)
+    if(NOT GO_EXECUTABLE)
+        message(FATAL_ERROR "Go is required to build arkbridge. Install Go or set HOSV_ENABLE_BYTEPLUS_ARK=OFF.")
+    endif()
+
+    set(ARKBRIDGE_OUTPUT "${CMAKE_BINARY_DIR}/arkbridge")
+    add_custom_command(
+        OUTPUT "${ARKBRIDGE_OUTPUT}"
+        COMMAND "${GO_EXECUTABLE}" build -o "${ARKBRIDGE_OUTPUT}" ./cmd/arkbridge
+        WORKING_DIRECTORY "${HOSV_ARKBRIDGE_DIR}"
+        DEPENDS
+            "${HOSV_ARKBRIDGE_DIR}/go.mod"
+            "${HOSV_ARKBRIDGE_DIR}/cmd/arkbridge/main.go"
+            "${HOSV_ARKBRIDGE_DIR}/internal/config/config.go"
+            "${HOSV_ARKBRIDGE_DIR}/internal/byteplus/client.go"
+            "${HOSV_ARKBRIDGE_DIR}/internal/byteplus/tasks.go"
+            "${HOSV_ARKBRIDGE_DIR}/internal/byteplus/status.go"
+            "${HOSV_ARKBRIDGE_DIR}/internal/bridge/protocol.go"
+            "${HOSV_ARKBRIDGE_DIR}/internal/logging/redact.go"
+        COMMENT "Build official BytePlus ModelArk arkbridge")
+    add_custom_target(arkbridge_target ALL DEPENDS "${ARKBRIDGE_OUTPUT}")
+    add_dependencies(hosv arkbridge_target)
+    add_custom_command(
+        TARGET hosv
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ARKBRIDGE_OUTPUT}"
+            "$<TARGET_FILE_DIR:hosv>/arkbridge"
+        COMMENT "Copy arkbridge next to hosv executable")
 endif()
 
 install(TARGETS hosv RUNTIME DESTINATION .)

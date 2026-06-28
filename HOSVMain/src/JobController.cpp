@@ -119,23 +119,15 @@ std::string resolve_target_file_path(const std::string& input_path, const std::s
     return target.string();
 }
 
-std::string task_summary(const seedance2::GenerationTask& task) {
+std::string task_summary(const VideoGenerationResult& task) {
     std::ostringstream out;
-    out << "Task " << task.id << " is " << seedance2::to_string(task.status);
-    if (!task.failed_reason.empty()) out << ". " << task.failed_reason;
+    out << "Task " << task.task_id << " is " << to_string(task.status);
+    if (!task.error_message.empty()) out << ". " << task.error_message;
     return out.str();
 }
 
-std::string output_summary(const seedance2::GenerationTask& task) {
-    std::ostringstream out;
-    if (!task.output_url.empty()) out << task.output_url;
-    for (const auto& url : task.video_urls) {
-        if (url != task.output_url) {
-            if (out.tellp() > 0) out << "\n";
-            out << url;
-        }
-    }
-    return out.str();
+std::string output_summary(const VideoGenerationResult& task) {
+    return task.video_url;
 }
 }
 
@@ -248,16 +240,16 @@ void JobController::run_generate(SceneInput snapshot, std::stop_token st) {
 
         set_phase(JobPhase::Polling, "Polling task status (" + task.id + ")...");
 
-        auto complete = service_->wait(task.id, std::chrono::milliseconds(5000), st, [this](const seedance2::GenerationTask& t) {
+        auto complete = service_->wait(task.id, std::chrono::milliseconds(5000), st, [this](const VideoGenerationResult& t) {
             update_status(task_summary(t));
         });
 
         if (st.stop_requested()) { set_cancelled(); return; }
 
-        if (complete.status == seedance2::TaskStatus::Succeeded) {
-            std::string download_url = complete.output_url.empty() ? (complete.video_urls.empty() ? "" : complete.video_urls[0]) : complete.output_url;
+        if (complete.status == VideoTaskStatus::Succeeded || complete.status == VideoTaskStatus::Completed) {
+            std::string download_url = complete.video_url;
             if (!download_url.empty()) {
-                std::string target_file = resolve_target_file_path(snapshot.save_path, download_url, complete.id);
+                std::string target_file = resolve_target_file_path(snapshot.save_path, download_url, complete.task_id);
                 set_phase(JobPhase::Downloading, "Downloading video to " + target_file + "...");
 
                 std::string err;
@@ -278,11 +270,6 @@ void JobController::run_generate(SceneInput snapshot, std::stop_token st) {
             fail(task_summary(complete));
             update_status(task_summary(complete), output_summary(complete));
         }
-    } catch (const seedance2::ApiException& e) {
-        if (st.stop_requested()) { set_cancelled(); return; }
-        std::string status_msg = "Error: ApiException (status=" + std::to_string(e.http_status) + ", code=" + e.error.code + ")";
-        fail(status_msg);
-        update_status(status_msg, e.error.message);
     } catch (const std::exception& e) {
         if (st.stop_requested()) { set_cancelled(); return; }
         fail(std::string("Error: ") + e.what());
@@ -299,10 +286,10 @@ void JobController::run_lookup(SceneInput snapshot, std::stop_token st) {
 
         if (st.stop_requested()) { set_cancelled(); return; }
 
-        if (task.status == seedance2::TaskStatus::Succeeded) {
-            std::string download_url = task.output_url.empty() ? (task.video_urls.empty() ? "" : task.video_urls[0]) : task.output_url;
+        if (task.status == VideoTaskStatus::Succeeded || task.status == VideoTaskStatus::Completed) {
+            std::string download_url = task.video_url;
             if (!download_url.empty()) {
-                std::string target_file = resolve_target_file_path(snapshot.save_path, download_url, task.id);
+                std::string target_file = resolve_target_file_path(snapshot.save_path, download_url, task.task_id);
                 set_phase(JobPhase::Downloading, "Downloading video to " + target_file + "...");
 
                 std::string err;
@@ -323,11 +310,6 @@ void JobController::run_lookup(SceneInput snapshot, std::stop_token st) {
             fail(task_summary(task));
             update_status(task_summary(task), output_summary(task));
         }
-    } catch (const seedance2::ApiException& e) {
-        if (st.stop_requested()) { set_cancelled(); return; }
-        std::string status_msg = "Error: ApiException (status=" + std::to_string(e.http_status) + ", code=" + e.error.code + ")";
-        fail(status_msg);
-        update_status(status_msg, e.error.message);
     } catch (const std::exception& e) {
         if (st.stop_requested()) { set_cancelled(); return; }
         fail(std::string("Error: ") + e.what());

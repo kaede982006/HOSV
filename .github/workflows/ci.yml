@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ golang-go
+
+      - name: Test arkbridge
+        working-directory: tools/arkbridge
+        run: |
+          go test ./...
+          go vet ./...
+          go build -o ../../build/arkbridge ./cmd/arkbridge
+
+      - name: Configure HOSVMain
+        run: cmake -S HOSVMain -B build/main -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build HOSVMain
+        run: cmake --build build/main --parallel
+
+      - name: Test HOSVMain
+        run: ./build/main/hosv --self-test
+
+      - name: Bridge self-test without key
+        run: |
+          set +e
+          ./build/main/arkbridge self-test > /tmp/arkbridge-self-test.json
+          code=$?
+          test "$code" -ne 0
+          grep -q '"error_code":"missing_api_key"' /tmp/arkbridge-self-test.json

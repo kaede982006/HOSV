@@ -6,6 +6,7 @@ project(seedance2_cpp
     LANGUAGES CXX)
 
 option(SEEDANCE2_BUILD_EXAMPLES "Build Seedance 2 examples" ON)
+option(SEEDANCE2_BUILD_TESTS "Build Seedance 2 tests" ON)
 option(SEEDANCE2_USE_BUNDLED_DEPS "Build bundled libcurl and mbedTLS from third_party" ON)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -81,6 +82,13 @@ set_target_properties(seedance2 PROPERTIES
 if(SEEDANCE2_BUILD_EXAMPLES)
     add_executable(seedance2_example examples/text_to_video.cpp)
     target_link_libraries(seedance2_example PRIVATE seedance2::seedance2)
+endif()
+
+if(SEEDANCE2_BUILD_TESTS)
+    enable_testing()
+    add_executable(seedance2_tests tests/seedance2_tests.cpp)
+    target_link_libraries(seedance2_tests PRIVATE seedance2::seedance2)
+    add_test(NAME seedance2_tests COMMAND seedance2_tests)
 endif()
 
 include(GNUInstallDirs)
