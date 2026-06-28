@@ -14,6 +14,7 @@ import (
 
 	"arkbridge/internal/bridge"
 	"arkbridge/internal/config"
+	"arkbridge/internal/logging"
 )
 
 const ProviderName = "byteplus_modelark"
@@ -32,7 +33,7 @@ type APIError struct {
 
 func (e APIError) Error() string {
 	if e.Message != "" {
-		return e.Message
+		return logging.RedactText(e.Message)
 	}
 	return e.Code
 }
@@ -68,13 +69,13 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (json.Ra
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, APIError{Code: "network_error", Message: err.Error(), Retryable: true}
+		return nil, APIError{Code: "network_error", Message: logging.RedactText(err.Error()), Retryable: true}
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return nil, APIError{Code: "network_error", Message: err.Error(), Retryable: true, StatusCode: resp.StatusCode}
+		return nil, APIError{Code: "network_error", Message: logging.RedactText(err.Error()), Retryable: true, StatusCode: resp.StatusCode}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, mapHTTPError(resp.StatusCode, data)
@@ -101,6 +102,7 @@ func mapHTTPError(status int, body []byte) APIError {
 	} else if parsed.Message != "" {
 		message = parsed.Message
 	}
+	message = logging.RedactText(message)
 
 	code := "unknown_error"
 	retryable := false
@@ -155,7 +157,7 @@ func errorResponse(err error) bridge.Response {
 	if errors.As(err, &apiErr) {
 		return bridge.Error(apiErr.Code, apiErr.Message, apiErr.Retryable)
 	}
-	return bridge.Error("unknown_error", err.Error(), false)
+	return bridge.Error("unknown_error", logging.RedactText(err.Error()), false)
 }
 
 func durationWithFallback(ms int, fallback time.Duration) time.Duration {
@@ -166,10 +168,11 @@ func durationWithFallback(ms int, fallback time.Duration) time.Duration {
 }
 
 func parseTask(raw json.RawMessage) bridge.Response {
-	var root map[string]any
-	if err := json.Unmarshal(raw, &root); err != nil {
-		return bridge.Error("parse_error", err.Error(), false)
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return bridge.Error("parse_error", logging.RedactText(err.Error()), false)
 	}
+	root, _ := decoded.(map[string]any)
 	source := firstObject(root, "data", "task", "result")
 	id := firstString(source, "id", "task_id", "taskId")
 	if id == "" {
@@ -181,10 +184,29 @@ func parseTask(raw json.RawMessage) bridge.Response {
 	}
 	videoURL := firstString(source, "video_url", "output_url", "url")
 	if videoURL == "" {
-		videoURL = firstURLFromArrays(source, "video_urls", "videos", "results")
+		videoURL = firstURLFromArrays(source, "video_urls", "videos", "results", "result", "outputs")
+	}
+	if videoURL == "" {
+		videoURL = firstURLDeep(decoded)
 	}
 	progress := firstIntPtr(source, "progress")
-	return bridge.Response{OK: true, TaskID: id, Status: status, Provider: ProviderName, Progress: progress, VideoURL: videoURL, Raw: raw}
+	if progress == nil {
+		progress = firstIntPtr(root, "progress")
+	}
+	errorMessage := firstErrorMessage(source)
+	if errorMessage == "" {
+		errorMessage = firstErrorMessage(root)
+	}
+	return bridge.Response{
+		OK:           true,
+		TaskID:       id,
+		Status:       status,
+		Provider:     ProviderName,
+		Progress:     progress,
+		VideoURL:     videoURL,
+		ErrorMessage: logging.RedactText(errorMessage),
+		Raw:          raw,
+	}
 }
 
 func firstObject(root map[string]any, keys ...string) map[string]any {
@@ -235,6 +257,40 @@ func firstURLFromArrays(root map[string]any, keys ...string) string {
 				}
 			}
 		}
+	}
+	return ""
+}
+
+func firstURLDeep(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		if value := firstString(typed, "video_url", "output_url", "url"); value != "" {
+			return value
+		}
+		for _, key := range []string{"video_urls", "videos", "results", "result", "outputs", "data", "task"} {
+			if found := firstURLDeep(typed[key]); found != "" {
+				return found
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if found := firstURLDeep(item); found != "" {
+				return found
+			}
+		}
+	}
+	return ""
+}
+
+func firstErrorMessage(root map[string]any) string {
+	if root == nil {
+		return ""
+	}
+	if value := firstString(root, "error_message", "message"); value != "" {
+		return value
+	}
+	if errObj, ok := root["error"].(map[string]any); ok {
+		return firstString(errObj, "message", "error_message", "code")
 	}
 	return ""
 }

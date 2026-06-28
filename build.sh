@@ -5,6 +5,24 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${ROOT_DIR}/build/HOSV"
 DIST_DIR="${ROOT_DIR}/dist"
 
+die() {
+    echo "build.sh: $*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command '$1' was not found"
+}
+
+preflight() {
+    require_command cmake
+    require_command go
+    require_command c++
+    [ -f "${ROOT_DIR}/HOSVMain/CMakeLists.txt" ] || die "missing HOSVMain/CMakeLists.txt"
+    [ -f "${ROOT_DIR}/tools/arkbridge/go.mod" ] || die "missing tools/arkbridge/go.mod"
+    [ -f "${ROOT_DIR}/tools/arkbridge/cmd/arkbridge/main.go" ] || die "missing tools/arkbridge/cmd/arkbridge/main.go"
+}
+
 clean_build() {
     echo "Cleaning build and distribution directories..."
     rm -rf "${ROOT_DIR}/build"
@@ -36,6 +54,8 @@ if [ $# -gt 0 ]; then
             ;;
     esac
 fi
+
+preflight
 
 cmake -S "${ROOT_DIR}/HOSVMain" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release
 cmake --build "${BUILD_DIR}" --config Release --parallel

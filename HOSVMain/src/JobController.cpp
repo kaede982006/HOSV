@@ -131,11 +131,39 @@ std::string output_summary(const VideoGenerationResult& task) {
     return task.video_url;
 }
 
-void apply_api_key_from_input(const SceneInput& input) {
-    if (!input.api_key.empty()) {
-        setenv("BYTEPLUS_ARK_API_KEY", input.api_key.c_str(), 1);
+class ScopedApiKeyEnv {
+public:
+    explicit ScopedApiKeyEnv(const SceneInput& input) {
+        const char* previous = std::getenv("BYTEPLUS_ARK_API_KEY");
+        had_previous_ = previous != nullptr;
+        if (previous) {
+            previous_ = previous;
+        }
+        if (!input.api_key.empty()) {
+            setenv("BYTEPLUS_ARK_API_KEY", input.api_key.c_str(), 1);
+            changed_ = true;
+        }
     }
-}
+
+    ~ScopedApiKeyEnv() {
+        if (!changed_) {
+            return;
+        }
+        if (had_previous_) {
+            setenv("BYTEPLUS_ARK_API_KEY", previous_.c_str(), 1);
+        } else {
+            unsetenv("BYTEPLUS_ARK_API_KEY");
+        }
+    }
+
+    ScopedApiKeyEnv(const ScopedApiKeyEnv&) = delete;
+    ScopedApiKeyEnv& operator=(const ScopedApiKeyEnv&) = delete;
+
+private:
+    bool changed_ = false;
+    bool had_previous_ = false;
+    std::string previous_;
+};
 }
 
 JobController::JobController(std::shared_ptr<SeedanceService> service, std::shared_ptr<AppState> model, std::shared_ptr<std::recursive_mutex> mutex)
@@ -245,7 +273,7 @@ void JobController::run_generate(SceneInput snapshot, std::stop_token st) {
     try {
         if (st.stop_requested()) { set_cancelled(); return; }
 
-        apply_api_key_from_input(snapshot);
+        ScopedApiKeyEnv api_key_env(snapshot);
         set_phase(JobPhase::Submitting, "Submitting generation request...");
         auto task = service_->submit_text(snapshot);
         set_current_task_id(task.id);
@@ -301,7 +329,7 @@ void JobController::run_lookup(SceneInput snapshot, std::stop_token st) {
     try {
         if (st.stop_requested()) { set_cancelled(); return; }
 
-        apply_api_key_from_input(snapshot);
+        ScopedApiKeyEnv api_key_env(snapshot);
         set_phase(JobPhase::Submitting, "Checking task status...");
         auto task = service_->lookup(snapshot.task_id_lookup);
 

@@ -17,6 +17,8 @@ The default provider is `byteplus-ark`.
 
 `arkbridge` reads secrets only from environment variables, receives non-secret generation parameters as JSON over stdin, calls official BytePlus ModelArk endpoints, and returns normalized JSON on stdout.
 
+When an API key is entered in the GUI, HOSV temporarily maps it to `BYTEPLUS_ARK_API_KEY` for the active job and restores the previous process environment value when that job exits. The key is not written to status text, bridge stdin, stdout, or stderr.
+
 Default official endpoint:
 
 ```text
@@ -61,7 +63,7 @@ export BYTEPLUS_ARK_DEBUG=false
 export BYTEPLUS_ARK_BRIDGE_PATH="./arkbridge"
 ```
 
-Media references must be public or signed `http://` / `https://` URLs. Local image uploads are not configured and local paths are rejected.
+Media references must be public or signed `http://` / `https://` URLs. Local media uploads are not configured yet and local paths are rejected before any API call.
 
 ## Build
 
@@ -146,6 +148,8 @@ export BYTEPLUS_ARK_RUN_INTEGRATION_TESTS=1
 ```
 
 No real credit-spending integration test is run by default.
+
+`arkbridge schema` and unit tests are local-only checks. They do not call BytePlus generation endpoints and must not require a real API key.
 
 ## Troubleshooting
 

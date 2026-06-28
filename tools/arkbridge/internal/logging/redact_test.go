@@ -1,6 +1,9 @@
 package logging
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRedactSecret(t *testing.T) {
 	liveKey := "sk_" + "live_" + "abcdefghijklmnopqrstuvwxyz"
@@ -25,5 +28,29 @@ func TestRedactSecret(t *testing.T) {
 				t.Fatalf("unexpected redact: got %q want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRedactText(t *testing.T) {
+	liveKey := "sk_" + "live_" + "abcdefghijklmnopqrstuvwxyz"
+	envKey := "unit_test_env_key_12345678901234567890"
+	bearerValue := "unit_test_bearer_token_12345678901234567890"
+	longToken := "unit_test_long_opaque_token_12345678901234567890"
+	input := "Authorization: Bearer " + bearerValue +
+		" BYTEPLUS_ARK_API_KEY=" + envKey +
+		" ARK_API_KEY=" + envKey +
+		" provider=" + liveKey +
+		" token=" + longToken
+
+	got := RedactText(input)
+	for _, leaked := range []string{bearerValue, envKey, liveKey, longToken} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("redacted text leaked %q in %q", leaked, got)
+		}
+	}
+	for _, want := range []string{"Authorization: Bearer ****", "BYTEPLUS_ARK_API_KEY=****", "ARK_API_KEY=****", "sk_live_****wxyz"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("redacted text missing %q in %q", want, got)
+		}
 	}
 }

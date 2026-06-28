@@ -139,7 +139,11 @@ VideoGenerationResult SeedanceService::wait(const std::string& task_id,
             return timeout;
         }
 
-        auto sleep_remaining = std::min(delay, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()));
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            continue;
+        }
+        auto sleep_remaining = std::min(delay, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now));
         const auto chunk = std::chrono::milliseconds(100);
         while (sleep_remaining > std::chrono::milliseconds(0)) {
             if (stop.stop_requested()) {
