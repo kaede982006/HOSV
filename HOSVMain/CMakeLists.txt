@@ -5,7 +5,7 @@ project(HOSV
     DESCRIPTION "Native GUI application for AI video generation using HOSVApi"
     LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -51,10 +51,14 @@ add_subdirectory("${HOSV_API_DIR}/third_party/curl-8.11.1" "${CMAKE_BINARY_DIR}/
 
 add_executable(hosv
     src/main.cpp
+    src/SeedanceService.cpp
+    src/JobController.cpp
     "${HOSV_API_DIR}/src/seedance2.cpp")
 
 target_include_directories(hosv PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${HOSV_API_DIR}/include"
+    "${HOSV_API_DIR}/third_party"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
 target_compile_definitions(hosv PRIVATE

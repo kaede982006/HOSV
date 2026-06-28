@@ -9,432 +9,110 @@
 #include <thread>
 
 #include <curl/curl.h>
+#include <nlohmann/json.hpp>
 
 namespace seedance2 {
 namespace {
 
-struct Json {
-    enum class Type { Null, Bool, Number, String, Array, Object };
-
-    Type type = Type::Null;
-    bool boolean = false;
-    double number = 0.0;
-    std::string string;
-    std::vector<Json> array;
-    std::map<std::string, Json> object;
-
-    bool is_object() const { return type == Type::Object; }
-    bool is_array() const { return type == Type::Array; }
-    bool is_string() const { return type == Type::String; }
-
-    const Json* get(const std::string& key) const {
-        if (!is_object()) return nullptr;
-        auto it = object.find(key);
-        return it == object.end() ? nullptr : &it->second;
-    }
-
-    std::string str_or_empty() const {
-        if (type == Type::String) return string;
-        if (type == Type::Number) {
-            std::ostringstream os;
-            os << number;
-            return os.str();
-        }
-        return {};
-    }
-};
-
-class JsonParser {
-public:
-    explicit JsonParser(const std::string& input) : input_(input) {}
-
-    Json parse() {
-        skip_ws();
-        Json value = parse_value();
-        skip_ws();
-        if (pos_ != input_.size()) throw std::runtime_error("Unexpected trailing JSON content");
-        return value;
-    }
-
-private:
-    Json parse_value() {
-        skip_ws();
-        if (pos_ >= input_.size()) throw std::runtime_error("Unexpected end of JSON");
-        const char c = input_[pos_];
-        if (c == 'n') return parse_literal("null", Json{});
-        if (c == 't') {
-            Json j;
-            j.type = Json::Type::Bool;
-            j.boolean = true;
-            return parse_literal("true", j);
-        }
-        if (c == 'f') {
-            Json j;
-            j.type = Json::Type::Bool;
-            j.boolean = false;
-            return parse_literal("false", j);
-        }
-        if (c == '"') return parse_string_json();
-        if (c == '[') return parse_array();
-        if (c == '{') return parse_object();
-        if (c == '-' || std::isdigit(static_cast<unsigned char>(c))) return parse_number();
-        throw std::runtime_error("Invalid JSON value");
-    }
-
-    Json parse_literal(const char* literal, Json value) {
-        const auto len = std::strlen(literal);
-        if (input_.compare(pos_, len, literal) != 0) {
-            throw std::runtime_error("Invalid JSON literal");
-        }
-        pos_ += len;
-        return value;
-    }
-
-    Json parse_string_json() {
-        Json j;
-        j.type = Json::Type::String;
-        j.string = parse_string();
-        return j;
-    }
-
-    std::string parse_string() {
-        expect('"');
-        std::string out;
-        while (pos_ < input_.size()) {
-            char c = input_[pos_++];
-            if (c == '"') return out;
-            if (c != '\\') {
-                out.push_back(c);
-                continue;
-            }
-            if (pos_ >= input_.size()) throw std::runtime_error("Invalid JSON escape");
-            char e = input_[pos_++];
-            switch (e) {
-                case '"': out.push_back('"'); break;
-                case '\\': out.push_back('\\'); break;
-                case '/': out.push_back('/'); break;
-                case 'b': out.push_back('\b'); break;
-                case 'f': out.push_back('\f'); break;
-                case 'n': out.push_back('\n'); break;
-                case 'r': out.push_back('\r'); break;
-                case 't': out.push_back('\t'); break;
-                case 'u':
-                    append_unicode_escape(out);
-                    break;
-                default:
-                    throw std::runtime_error("Unsupported JSON escape");
-            }
-        }
-        throw std::runtime_error("Unterminated JSON string");
-    }
-
-    void append_unicode_escape(std::string& out) {
-        if (pos_ + 4 > input_.size()) throw std::runtime_error("Invalid unicode escape");
-        unsigned int code = 0;
-        for (int i = 0; i < 4; ++i) {
-            char c = input_[pos_++];
-            code <<= 4;
-            if (c >= '0' && c <= '9') code += c - '0';
-            else if (c >= 'a' && c <= 'f') code += 10 + c - 'a';
-            else if (c >= 'A' && c <= 'F') code += 10 + c - 'A';
-            else throw std::runtime_error("Invalid unicode escape");
-        }
-        if (code <= 0x7F) {
-            out.push_back(static_cast<char>(code));
-        } else if (code <= 0x7FF) {
-            out.push_back(static_cast<char>(0xC0 | ((code >> 6) & 0x1F)));
-            out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
-        } else {
-            out.push_back(static_cast<char>(0xE0 | ((code >> 12) & 0x0F)));
-            out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
-        }
-    }
-
-    Json parse_array() {
-        Json j;
-        j.type = Json::Type::Array;
-        expect('[');
-        skip_ws();
-        if (consume(']')) return j;
-        while (true) {
-            j.array.push_back(parse_value());
-            skip_ws();
-            if (consume(']')) return j;
-            expect(',');
-        }
-    }
-
-    Json parse_object() {
-        Json j;
-        j.type = Json::Type::Object;
-        expect('{');
-        skip_ws();
-        if (consume('}')) return j;
-        while (true) {
-            skip_ws();
-            std::string key = parse_string();
-            skip_ws();
-            expect(':');
-            j.object.emplace(std::move(key), parse_value());
-            skip_ws();
-            if (consume('}')) return j;
-            expect(',');
-        }
-    }
-
-    Json parse_number() {
-        const std::size_t start = pos_;
-        if (input_[pos_] == '-') ++pos_;
-        while (pos_ < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_]))) ++pos_;
-        if (pos_ < input_.size() && input_[pos_] == '.') {
-            ++pos_;
-            while (pos_ < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_]))) ++pos_;
-        }
-        if (pos_ < input_.size() && (input_[pos_] == 'e' || input_[pos_] == 'E')) {
-            ++pos_;
-            if (pos_ < input_.size() && (input_[pos_] == '+' || input_[pos_] == '-')) ++pos_;
-            while (pos_ < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_]))) ++pos_;
-        }
-        Json j;
-        j.type = Json::Type::Number;
-        j.number = std::strtod(input_.c_str() + start, nullptr);
-        return j;
-    }
-
-    void skip_ws() {
-        while (pos_ < input_.size() && std::isspace(static_cast<unsigned char>(input_[pos_]))) ++pos_;
-    }
-
-    bool consume(char c) {
-        if (pos_ < input_.size() && input_[pos_] == c) {
-            ++pos_;
-            return true;
-        }
-        return false;
-    }
-
-    void expect(char c) {
-        skip_ws();
-        if (!consume(c)) throw std::runtime_error("Unexpected JSON character");
-    }
-
-    const std::string& input_;
-    std::size_t pos_ = 0;
-};
-
-std::string escape_json(const std::string& value) {
-    std::string out;
-    out.reserve(value.size() + 2);
-    for (char c : value) {
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b"; break;
-            case '\f': out += "\\f"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    static const char* hex = "0123456789abcdef";
-                    out += "\\u00";
-                    out.push_back(hex[(c >> 4) & 0x0F]);
-                    out.push_back(hex[c & 0x0F]);
-                } else {
-                    out.push_back(c);
-                }
-        }
-    }
-    return out;
-}
-
-void add_string_field(std::ostringstream& os, bool& first, const std::string& key, const std::string& value) {
-    if (value.empty()) return;
-    if (!first) os << ',';
-    first = false;
-    os << '"' << key << "\":\"" << escape_json(value) << '"';
-}
-
-void add_required_string_field(std::ostringstream& os, bool& first, const std::string& key, const std::string& value) {
-    if (!first) os << ',';
-    first = false;
-    os << '"' << key << "\":\"" << escape_json(value) << '"';
-}
-
-void add_int_field(std::ostringstream& os, bool& first, const std::string& key, std::int64_t value) {
-    if (!first) os << ',';
-    first = false;
-    os << '"' << key << "\":" << value;
-}
-
-void add_bool_field(std::ostringstream& os, bool& first, const std::string& key, const std::optional<bool>& value) {
-    if (!value.has_value()) return;
-    if (!first) os << ',';
-    first = false;
-    os << '"' << key << "\":" << (*value ? "true" : "false");
-}
-
-void add_string_array_field(std::ostringstream& os, bool& first, const std::string& key, const std::vector<std::string>& values) {
-    if (values.empty()) return;
-    if (!first) os << ',';
-    first = false;
-    os << '"' << key << "\":[";
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        if (i != 0) os << ',';
-        os << '"' << escape_json(values[i]) << '"';
-    }
-    os << ']';
-}
-
-void add_input_options(std::ostringstream& os, bool& first, const GenerationOptions& options) {
-    add_required_string_field(os, first, "resolution", to_string(options.resolution));
-    add_required_string_field(os, first, "aspect_ratio", to_string(options.aspect_ratio));
-    add_int_field(os, first, "duration", options.duration_seconds);
-    if (options.camera_fixed != CameraFixed::Unset) {
-        add_required_string_field(os, first, "camera_fixed", options.camera_fixed == CameraFixed::On ? "on" : "off");
-    }
-    add_bool_field(os, first, "generate_audio", options.generate_audio);
-    add_bool_field(os, first, "watermark", options.watermark);
-    add_bool_field(os, first, "web_search", options.web_search);
-    add_bool_field(os, first, "return_last_frame", options.return_last_frame);
-    add_int_field(os, first, "seed", options.seed);
-}
-
-void begin_generation_body(std::ostringstream& os, bool& top_first, const GenerationOptions& options) {
-    os << '{';
-    top_first = true;
-    add_required_string_field(os, top_first, "model", to_string(options.model));
-    add_string_field(os, top_first, "callback_url", options.callback_url);
-    if (!top_first) os << ',';
-    top_first = false;
-    os << "\"input\":{";
-}
-
-std::string text_request_body(const TextToVideoRequest& request) {
-    std::ostringstream os;
-    bool top_first = true;
-    begin_generation_body(os, top_first, request.options);
-    bool first = true;
-    add_required_string_field(os, first, "prompt", request.prompt);
-    add_required_string_field(os, first, "generation_type", "text-to-video");
-    add_input_options(os, first, request.options);
-    os << "}}";
-    return os.str();
-}
-
-std::string image_request_body(const ImageToVideoRequest& request) {
-    std::ostringstream os;
-    bool top_first = true;
-    begin_generation_body(os, top_first, request.options);
-    bool first = true;
-    add_required_string_field(os, first, "prompt", request.prompt);
-    add_required_string_field(os, first, "generation_type", "image-to-video");
-    std::vector<std::string> urls = request.image_urls;
-    if (urls.empty() && !request.image_url.empty()) urls.push_back(request.image_url);
-    add_string_array_field(os, first, "image_urls", urls);
-    add_input_options(os, first, request.options);
-    os << "}}";
-    return os.str();
-}
-
-std::string multi_image_request_body(const MultiImageRequest& request) {
-    ImageToVideoRequest image_request;
-    image_request.prompt = request.prompt;
-    image_request.image_urls = request.image_urls;
-    image_request.options = request.options;
-    return image_request_body(image_request);
-}
-
-std::string reference_request_body(const ReferenceToVideoRequest& request) {
-    std::ostringstream os;
-    bool top_first = true;
-    begin_generation_body(os, top_first, request.options);
-    bool first = true;
-    add_required_string_field(os, first, "prompt", request.prompt);
-    add_required_string_field(os, first, "generation_type", "reference-to-video");
-    add_string_array_field(os, first, "image_urls", request.image_urls);
-    add_string_array_field(os, first, "video_urls", request.video_urls);
-    add_string_array_field(os, first, "audio_urls", request.audio_urls);
-    add_input_options(os, first, request.options);
-    os << "}}";
-    return os.str();
-}
+using json = nlohmann::json;
 
 std::string trim_trailing_slash(std::string value) {
     while (!value.empty() && value.back() == '/') value.pop_back();
     return value;
 }
 
-std::string nested_string(const Json& json, const std::vector<std::string>& path) {
-    const Json* current = &json;
+std::string nested_string(const json& j, const std::vector<std::string>& path) {
+    const json* current = &j;
     for (const auto& key : path) {
-        current = current->get(key);
-        if (!current) return {};
+        if (!current->is_object() || !current->contains(key)) return {};
+        current = &(*current)[key];
     }
-    return current->str_or_empty();
+    if (current->is_string()) return current->get<std::string>();
+    if (current->is_number()) {
+        std::ostringstream os;
+        os << current->get<double>();
+        return os.str();
+    }
+    return {};
 }
 
-int nested_int(const Json& json, const std::vector<std::string>& path) {
-    const Json* current = &json;
+int nested_int(const json& j, const std::vector<std::string>& path) {
+    const json* current = &j;
     for (const auto& key : path) {
-        current = current->get(key);
-        if (!current) return 0;
+        if (!current->is_object() || !current->contains(key)) return 0;
+        current = &(*current)[key];
     }
-    if (current->type == Json::Type::Number) return static_cast<int>(current->number);
-    if (current->type == Json::Type::String) return std::atoi(current->string.c_str());
+    if (current->is_number()) return current->get<int>();
+    if (current->is_string()) return std::atoi(current->get<std::string>().c_str());
     return 0;
 }
 
-std::vector<std::string> collect_urls_from_json(const Json& json) {
+std::vector<std::string> collect_urls_from_json(const json& j) {
     std::vector<std::string> urls;
-    auto collect_array = [&urls](const Json* value) {
-        if (!value || !value->is_array()) return;
-        for (const auto& item : value->array) {
+    auto collect_array = [&urls](const json& parent, const std::string& key) {
+        if (!parent.is_object() || !parent.contains(key)) return;
+        const auto& val = parent[key];
+        if (!val.is_array()) return;
+        for (const auto& item : val) {
             if (item.is_string()) {
-                urls.push_back(item.string);
+                urls.push_back(item.get<std::string>());
             } else if (item.is_object()) {
-                if (auto url = item.get("url"); url && url->is_string()) urls.push_back(url->string);
-                else if (auto video_url = item.get("video_url"); video_url && video_url->is_string()) urls.push_back(video_url->string);
+                if (item.contains("url") && item["url"].is_string()) {
+                    urls.push_back(item["url"].get<std::string>());
+                } else if (item.contains("video_url") && item["video_url"].is_string()) {
+                    urls.push_back(item["video_url"].get<std::string>());
+                }
             }
         }
     };
 
-    collect_array(json.get("video_urls"));
-    collect_array(json.get("videos"));
-    collect_array(json.get("results"));
-    if (auto data = json.get("data")) {
-        collect_array(data->get("video_urls"));
-        collect_array(data->get("videos"));
-        collect_array(data->get("results"));
+    collect_array(j, "video_urls");
+    collect_array(j, "videos");
+    collect_array(j, "results");
+    if (j.is_object() && j.contains("data") && j["data"].is_object()) {
+        collect_array(j["data"], "video_urls");
+        collect_array(j["data"], "videos");
+        collect_array(j["data"], "results");
     }
-    if (auto result = json.get("result")) {
-        collect_array(result->get("video_urls"));
-        collect_array(result->get("videos"));
+    if (j.is_object() && j.contains("result") && j["result"].is_object()) {
+        collect_array(j["result"], "video_urls");
+        collect_array(j["result"], "videos");
     }
     std::sort(urls.begin(), urls.end());
     urls.erase(std::unique(urls.begin(), urls.end()), urls.end());
     return urls;
 }
 
-ErrorInfo parse_error_info(const Json& json) {
-    const Json* source = &json;
-    if (auto e = json.get("error"); e && e->is_object()) source = e;
+ErrorInfo parse_error_info(const json& j) {
+    const json* source = &j;
+    if (j.is_object() && j.contains("error") && j["error"].is_object()) {
+        source = &j["error"];
+    }
     ErrorInfo info;
-    if (auto code = source->get("code")) info.code = code->str_or_empty();
-    if (auto message = source->get("message")) info.message = message->str_or_empty();
-    if (auto type = source->get("type")) info.type = type->str_or_empty();
-    if (info.message.empty() && source != &json) {
-        if (auto error_message = json.get("message")) info.message = error_message->str_or_empty();
+    if (source->is_object()) {
+        if (source->contains("code")) {
+            auto& val = (*source)["code"];
+            if (val.is_string()) info.code = val.get<std::string>();
+            else if (val.is_number()) info.code = std::to_string(val.get<int>());
+        }
+        if (source->contains("message") && (*source)["message"].is_string()) {
+            info.message = (*source)["message"].get<std::string>();
+        }
+        if (source->contains("type") && (*source)["type"].is_string()) {
+            info.type = (*source)["type"].get<std::string>();
+        }
+    }
+    if (info.message.empty() && source != &j && j.is_object() && j.contains("message") && j["message"].is_string()) {
+        info.message = j["message"].get<std::string>();
     }
     return info;
 }
 
 GenerationTask parse_task(const std::string& body) {
-    Json root = JsonParser(body).parse();
-    const Json* source = &root;
-    if (auto data = root.get("data"); data && data->is_object()) source = data;
-    if (auto task = root.get("task"); task && task->is_object()) source = task;
+    json root = json::parse(body);
+    const json* source = &root;
+    if (root.is_object() && root.contains("data") && root["data"].is_object()) source = &root["data"];
+    if (root.is_object() && root.contains("task") && root["task"].is_object()) source = &root["task"];
 
     GenerationTask result;
     result.raw_json = body;
@@ -469,10 +147,133 @@ GenerationTask parse_task(const std::string& body) {
         result.video_urls.push_back(result.output_url);
     }
 
-    if (root.get("error") || source->get("error")) {
-        result.error = parse_error_info(source->get("error") ? *source : root);
+    if ((root.is_object() && root.contains("error")) || (source->is_object() && source->contains("error"))) {
+        result.error = parse_error_info(source->is_object() && source->contains("error") ? *source : root);
     }
     return result;
+}
+
+std::string text_request_body(const TextToVideoRequest& request) {
+    json input = {
+        {"prompt", request.prompt},
+        {"generation_type", "text-to-video"},
+        {"resolution", to_string(request.options.resolution)},
+        {"aspect_ratio", to_string(request.options.aspect_ratio)},
+        {"duration", request.options.duration_seconds},
+        {"seed", request.options.seed}
+    };
+    if (request.options.camera_fixed != CameraFixed::Unset) {
+        input["camera_fixed"] = request.options.camera_fixed == CameraFixed::On ? "on" : "off";
+    }
+    if (request.options.generate_audio.has_value()) {
+        input["generate_audio"] = *request.options.generate_audio;
+    }
+    if (request.options.watermark.has_value()) {
+        input["watermark"] = *request.options.watermark;
+    }
+    if (request.options.web_search.has_value()) {
+        input["web_search"] = *request.options.web_search;
+    }
+    if (request.options.return_last_frame.has_value()) {
+        input["return_last_frame"] = *request.options.return_last_frame;
+    }
+
+    json body = {
+        {"model", to_string(request.options.model)},
+        {"input", input}
+    };
+    if (!request.options.callback_url.empty()) {
+        body["callback_url"] = request.options.callback_url;
+    }
+    return body.dump();
+}
+
+std::string image_request_body(const ImageToVideoRequest& request) {
+    json input = {
+        {"prompt", request.prompt},
+        {"generation_type", "image-to-video"},
+        {"resolution", to_string(request.options.resolution)},
+        {"aspect_ratio", to_string(request.options.aspect_ratio)},
+        {"duration", request.options.duration_seconds},
+        {"seed", request.options.seed}
+    };
+    if (request.options.camera_fixed != CameraFixed::Unset) {
+        input["camera_fixed"] = request.options.camera_fixed == CameraFixed::On ? "on" : "off";
+    }
+    if (request.options.generate_audio.has_value()) {
+        input["generate_audio"] = *request.options.generate_audio;
+    }
+    if (request.options.watermark.has_value()) {
+        input["watermark"] = *request.options.watermark;
+    }
+    if (request.options.web_search.has_value()) {
+        input["web_search"] = *request.options.web_search;
+    }
+    if (request.options.return_last_frame.has_value()) {
+        input["return_last_frame"] = *request.options.return_last_frame;
+    }
+
+    std::vector<std::string> urls = request.image_urls;
+    if (urls.empty() && !request.image_url.empty()) urls.push_back(request.image_url);
+    if (!urls.empty()) {
+        input["image_urls"] = urls;
+    }
+
+    json body = {
+        {"model", to_string(request.options.model)},
+        {"input", input}
+    };
+    if (!request.options.callback_url.empty()) {
+        body["callback_url"] = request.options.callback_url;
+    }
+    return body.dump();
+}
+
+std::string multi_image_request_body(const MultiImageRequest& request) {
+    ImageToVideoRequest image_request;
+    image_request.prompt = request.prompt;
+    image_request.image_urls = request.image_urls;
+    image_request.options = request.options;
+    return image_request_body(image_request);
+}
+
+std::string reference_request_body(const ReferenceToVideoRequest& request) {
+    json input = {
+        {"prompt", request.prompt},
+        {"generation_type", "reference-to-video"},
+        {"resolution", to_string(request.options.resolution)},
+        {"aspect_ratio", to_string(request.options.aspect_ratio)},
+        {"duration", request.options.duration_seconds},
+        {"seed", request.options.seed}
+    };
+    if (request.options.camera_fixed != CameraFixed::Unset) {
+        input["camera_fixed"] = request.options.camera_fixed == CameraFixed::On ? "on" : "off";
+    }
+    if (request.options.generate_audio.has_value()) {
+        input["generate_audio"] = *request.options.generate_audio;
+    }
+    if (request.options.watermark.has_value()) {
+        input["watermark"] = *request.options.watermark;
+    }
+    if (request.options.web_search.has_value()) {
+        input["web_search"] = *request.options.web_search;
+    }
+    if (request.options.return_last_frame.has_value()) {
+        input["return_last_frame"] = *request.options.return_last_frame;
+    }
+
+    if (!request.image_urls.empty()) input["image_urls"] = request.image_urls;
+    if (!request.video_urls.empty()) input["video_urls"] = request.video_urls;
+    if (!request.audio_urls.empty()) input["audio_urls"] = request.audio_urls;
+
+    json body = {
+        {"model", to_string(request.options.model)},
+        {"input", input}
+    };
+    if (!request.options.callback_url.empty()) {
+        body["callback_url"] = request.options.callback_url;
+    }
+    return body.dump();
 }
 
 struct HttpResponse {
@@ -681,7 +482,7 @@ struct Client::Impl {
         if (status < 200 || status >= 300) {
             ErrorInfo error;
             try {
-                error = parse_error_info(JsonParser(response.body).parse());
+                error = parse_error_info(json::parse(response.body));
             } catch (...) {
                 error.message = response.body;
             }

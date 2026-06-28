@@ -57,7 +57,7 @@ add_library(seedance2 SHARED
 
 add_library(seedance2::seedance2 ALIAS seedance2)
 
-target_compile_features(seedance2 PUBLIC cxx_std_17)
+target_compile_features(seedance2 PUBLIC cxx_std_20)
 target_compile_definitions(seedance2 PRIVATE SEEDANCE2_BUILDING_LIBRARY)
 if(SEEDANCE2_USE_BUNDLED_DEPS)
     target_compile_definitions(seedance2 PRIVATE CURL_STATICLIB)
@@ -66,7 +66,9 @@ endif()
 target_include_directories(seedance2
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>)
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
 target_link_libraries(seedance2 PRIVATE CURL::libcurl)
 

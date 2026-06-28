@@ -1,4 +1,7 @@
 #include "seedance2/seedance2.hpp"
+#include "AppModel.hpp"
+#include "SeedanceService.hpp"
+#include "JobController.hpp"
 
 #include <algorithm>
 #include <array>
@@ -785,12 +788,7 @@ void ensure_back_buffer(X11& x11, int width, int height) {
     x11.buffer_h = height;
 }
 
-struct Rect {
-    int x = 0;
-    int y = 0;
-    int w = 0;
-    int h = 0;
-};
+
 
 bool contains(const Rect& r, int x, int y) {
     return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
@@ -882,112 +880,25 @@ constexpr int CONTENT_TOP = 92;
 constexpr int BOTTOM_MARGIN = 28;
 } // namespace LayoutConsts
 
-struct RenderControlsLayout {
-    int grid_y = 0;
-    int metadata_y = 0;
-    int attached_label_x = 0;
-    int attached_label_y = 0;
-    int attached_value_x = 0;
-    int attached_value_y = 0;
-    int duration_text_x = 0;
-    int duration_text_y = 0;
-};
+namespace {
+std::vector<std::string> parse_reference_urls(const std::string& input) {
+    std::vector<std::string> urls;
+    std::stringstream ss(input);
+    std::string line;
+    while (std::getline(ss, line)) {
+        std::stringstream line_ss(line);
+        std::string segment;
+        while (std::getline(line_ss, segment, ',')) {
+            segment = trim_spaces(segment);
+            if (!segment.empty()) {
+                urls.push_back(segment);
+            }
+        }
+    }
+    return urls;
+}
+}
 
-struct Layout {
-    int pad = LayoutConsts::PAD;
-    int gap = LayoutConsts::GAP;
-    int left_w = 0;
-    int side_w = 0;
-    int side_x = 0;
-    int side_y = LayoutConsts::CONTENT_TOP;
-    int side_h = 0;
-
-    Rect logo{};
-    Rect composition_panel{};
-    Rect render_panel{};
-    Rect studio_panel{};
-    Rect preview{};
-    Rect progress{};
-
-    int title_x = 0;
-    int title_y = 0;
-    int tagline_x = 0;
-    int tagline_y = 0;
-
-    int pipeline_label_y = 0;
-    int pipeline_status_y = 0;
-    int status_label_y = 0;
-    int status_text_y = 0;
-    int output_label_y = 0;
-    int output_text_y = 0;
-
-    RenderControlsLayout render_controls;
-};
-
-struct LogoImage {
-    std::vector<unsigned char> pixels;
-    int width = 0;
-    int height = 0;
-    bool loaded = false;
-    std::string source_path;
-};
-
-struct Field {
-    std::string label;
-    std::string value;
-    Rect rect;
-    int label_y = 0;
-    int cursor = 0;
-    int selection_start = -1;
-    int selection_end = -1;
-    bool multiline = false;
-    bool secret = false;
-    bool readonly = false;
-};
-
-struct Button {
-    std::string label;
-    Rect rect;
-};
-
-struct FileEntry {
-    std::string name;
-    std::string path;
-    bool directory = false;
-    Rect rect;
-};
-
-struct AppState {
-    int width = 980;
-    int height = 846;
-    Layout layout;
-    LogoImage logo;
-    std::vector<Field> fields;
-    std::vector<Button> buttons;
-    std::vector<FileEntry> file_entries;
-    std::vector<std::string> local_images;
-    int focus = 1;
-    bool cursor_blink_on = true;
-    int model = 0;
-    int resolution = 1;
-    int aspect = 0;
-    int duration = 5;
-    bool audio = true;
-    bool watermark = false;
-    std::string task_id;
-    std::string status = "Ready. Compose a scene, attach references, then render through HOSVApi.";
-    std::string output;
-    std::string file_browser_dir;
-    int file_page = 0;
-    int file_cursor = 0;
-    bool file_browser_show_hidden = false;
-    bool file_browser_open = false;
-    bool busy = false;
-    bool should_close = false;
-    bool frame_dirty = false;
-    bool has_error = false;
-    std::function<void()> request_redraw;
-};
 
 int field_inner_width(const Rect& rect) {
     return std::max(16, rect.w - 20);
@@ -1687,7 +1598,7 @@ void set_layout(AppState& app) {
     app.fields[1].secret = false;
     content_y = app.fields[1].rect.y + app.fields[1].rect.h + LayoutConsts::ROW_GAP + LayoutConsts::REFERENCE_SECTION_GAP;
 
-    app.fields[2].label = "Local Reference Images";
+    app.fields[2].label = "Reference Image URLs";
     app.fields[2].label_y = content_y + LayoutConsts::FIELD_LABEL_GAP;
     const int attach_w = 110;
     const int cancel_w = 60;
@@ -1696,7 +1607,7 @@ void set_layout(AppState& app) {
     app.fields[2].rect = {field_x, content_y + 24, reference_w, LayoutConsts::REFERENCE_FIELD_H};
     app.fields[2].multiline = true;
     app.fields[2].secret = false;
-    app.fields[2].readonly = true;
+    app.fields[2].readonly = false;
     content_y = app.fields[2].rect.y + app.fields[2].rect.h + inner;
 
     L.composition_panel = {comp_x, comp_y, comp_w, content_y - comp_y};
@@ -1827,7 +1738,8 @@ bool copy_text_to_clipboard(X11& x11, const std::string& text);
 void click_button(
     int index,
     const std::shared_ptr<AppState>& app,
-    const std::shared_ptr<std::recursive_mutex>& mutex);
+    const std::shared_ptr<std::recursive_mutex>& mutex,
+    const std::shared_ptr<JobController>& jobs = nullptr);
 
 int run_self_tests() {
     SelfTestRunner test;
@@ -2714,336 +2626,34 @@ void redraw(X11& x11, AppState& app) {
     x11.XFlush(x11.display);
 }
 
-void update_status(AppState& app, std::recursive_mutex& mutex, const std::string& status, const std::string& output = {}) {
-    std::lock_guard<std::recursive_mutex> lock(mutex);
-    app.status = status;
-    if (!output.empty()) app.output = output;
-    app.frame_dirty = true;
-    if (app.request_redraw) {
-        app.request_redraw();
+
+
+SceneInput make_scene_input(const AppState& app) {
+    SceneInput input;
+    input.api_key = trim_spaces(app.fields[0].value);
+    input.prompt = trim_spaces(app.fields[1].value);
+    input.save_path = trim_spaces(app.fields[3].value);
+    input.task_id_lookup = trim_spaces(app.fields[4].value);
+    
+    std::vector<std::string> ref_urls = parse_reference_urls(app.fields[2].value);
+    for (const auto& url : ref_urls) {
+        input.local_images.push_back(fs::path(url));
     }
-}
-
-void mark_idle(AppState& app, std::recursive_mutex& mutex) {
-    std::lock_guard<std::recursive_mutex> lock(mutex);
-    app.busy = false;
-    app.frame_dirty = true;
-    if (app.request_redraw) {
-        app.request_redraw();
-    }
-}
-
-std::string task_summary(const seedance2::GenerationTask& task) {
-    std::ostringstream out;
-    out << "Task " << task.id << " is " << seedance2::to_string(task.status);
-    if (!task.failed_reason.empty()) out << ". " << task.failed_reason;
-    return out.str();
-}
-
-std::string output_summary(const seedance2::GenerationTask& task) {
-    std::ostringstream out;
-    if (!task.output_url.empty()) out << task.output_url;
-    for (const auto& url : task.video_urls) {
-        if (url != task.output_url) {
-            if (out.tellp() > 0) out << "\n";
-            out << url;
-        }
-    }
-    if (out.tellp() == 0 && task.error) out << task.error->message;
-    return out.str();
-}
-
-seedance2::Client make_client(const AppState& snapshot) {
-    seedance2::ClientOptions options;
-    options.api_key = snapshot.fields[0].value;
-    return seedance2::Client(options);
-}
-
-void start_generate(
-    AppState snapshot,
-    const std::shared_ptr<AppState>& app,
-    const std::shared_ptr<std::recursive_mutex>& mutex) {
-    {
-        std::lock_guard<std::recursive_mutex> lock(*mutex);
-        if (app->busy) return;
-
-        std::string api_key = trim_spaces(snapshot.fields[0].value);
-        std::string prompt = trim_spaces(snapshot.fields[1].value);
-        std::string save_path = trim_spaces(snapshot.fields[3].value);
-
-        if (api_key.empty()) {
-            app->status = "Error: API Key is required.";
-            log_error("Validation failed: API Key is empty.");
-            app->has_error = true;
-            app->frame_dirty = true;
-            return;
-        }
-        if (prompt.empty()) {
-            app->status = "Error: Scene Direction is required.";
-            log_error("Validation failed: Scene Direction is empty.");
-            app->has_error = true;
-            app->frame_dirty = true;
-            return;
-        }
-        if (save_path.empty()) {
-            app->status = "Error: Save Path is required.";
-            log_error("Validation failed: Save Path is empty.");
-            app->has_error = true;
-            app->frame_dirty = true;
-            return;
-        }
-
-        fs::path p(save_path);
-        std::error_code ec;
-        fs::path parent = p.parent_path();
-        bool is_dir = fs::is_directory(p, ec) || save_path.back() == '/' || save_path.back() == '\\';
-        if (is_dir) {
-            if (!p.empty() && !fs::exists(p, ec) && !fs::exists(p.parent_path(), ec)) {
-                app->status = "Error: Target directory does not exist.";
-                log_error("Validation failed: Target directory " + save_path + " does not exist.");
-                app->has_error = true;
-                app->frame_dirty = true;
-                return;
-            }
-        } else {
-            if (!parent.empty() && !fs::exists(parent, ec)) {
-                app->status = "Error: Target directory " + parent.string() + " does not exist.";
-                log_error("Validation failed: Parent directory " + parent.string() + " does not exist.");
-                app->has_error = true;
-                app->frame_dirty = true;
-                return;
-            }
-        }
-
-        app->busy = true;
-        app->status = "Submitting generation request...";
-        app->output.clear();
-        app->has_error = false;
-    }
-
-    std::thread([snapshot, app, mutex]() {
-        try {
-            log_info("Starting generate: model=" + std::to_string(snapshot.model) + 
-                     ", resolution=" + std::to_string(snapshot.resolution) + 
-                     ", aspect=" + std::to_string(snapshot.aspect) + 
-                     ", duration=" + std::to_string(snapshot.duration));
-            
-            auto client = make_client(snapshot);
-            seedance2::GenerationOptions options;
-            options.model = snapshot.model == 1 ? seedance2::VideoModel::Seedance20Fast : seedance2::VideoModel::Seedance20;
-            options.resolution = resolution_value(snapshot.resolution);
-            options.aspect_ratio = aspect_value(snapshot.aspect);
-            options.duration_seconds = snapshot.duration;
-            options.generate_audio = snapshot.audio;
-            options.watermark = snapshot.watermark;
-
-            if (!snapshot.local_images.empty()) {
-                update_status(*app, *mutex, "Local references are attached in HOSV. Submitting the scene direction to HOSVApi.");
-            }
-
-            seedance2::TextToVideoRequest request;
-            request.prompt = snapshot.fields[1].value;
-            request.options = options;
-            
-            log_info("Submitting text-to-video request to HOSVApi...");
-            seedance2::GenerationTask task = client.create_text_to_video(request);
-
-            log_info("Submitted task: ID=" + task.id + ", Status=" + seedance2::to_string(task.status));
-            update_status(*app, *mutex, "Submitted task " + task.id + ". Waiting for completion...");
-            
-            auto complete = client.wait_for_task(task.id, {std::chrono::milliseconds(5000), std::chrono::milliseconds(0)},
-                [app, mutex](const seedance2::GenerationTask& progress) {
-                    log_info("Task " + progress.id + " progress: Status=" + seedance2::to_string(progress.status));
-                    update_status(*app, *mutex, task_summary(progress));
-                });
-            
-            log_info("Task " + complete.id + " completed with Status=" + seedance2::to_string(complete.status));
-            
-            if (complete.status == seedance2::TaskStatus::Succeeded) {
-                std::string download_url = complete.output_url.empty() ? (complete.video_urls.empty() ? "" : complete.video_urls[0]) : complete.output_url;
-                if (!download_url.empty()) {
-                    std::string save_path_input = snapshot.fields[3].value;
-                    std::string target_file = resolve_target_file_path(save_path_input, download_url, complete.id);
-                    
-                    log_info("Task succeeded. Starting download from " + download_url + " to " + target_file);
-                    update_status(*app, *mutex, "Downloading video to: " + target_file);
-                    
-                    std::string err;
-                    if (download_file(download_url, target_file, err)) {
-                        log_info("Successfully saved video to " + target_file);
-                        update_status(*app, *mutex, "Downloaded to " + target_file, output_summary(complete));
-                    } else {
-                        log_error("Failed to download video: " + err);
-                        {
-                            std::lock_guard<std::recursive_mutex> lock(*mutex);
-                            app->has_error = true;
-                        }
-                        update_status(*app, *mutex, "Download failed: " + err, output_summary(complete));
-                    }
-                } else {
-                    log_error("Task succeeded but video URL is empty.");
-                    {
-                        std::lock_guard<std::recursive_mutex> lock(*mutex);
-                        app->has_error = true;
-                    }
-                    update_status(*app, *mutex, "Success, but video URL is empty.", output_summary(complete));
-                }
-            } else {
-                {
-                    std::lock_guard<std::recursive_mutex> lock(*mutex);
-                    app->has_error = true;
-                }
-                update_status(*app, *mutex, task_summary(complete), output_summary(complete));
-            }
-        } catch (const seedance2::ApiException& error) {
-            log_exception(error, "start_generate");
-            std::string status_msg = "Error: ApiException (status=" + std::to_string(error.http_status) + ", code=" + error.error.code + ")";
-            std::string output_msg = error.error.message;
-            if (!error.response_body.empty()) {
-                output_msg += "\n" + error.response_body;
-            }
-            {
-                std::lock_guard<std::recursive_mutex> lock(*mutex);
-                app->has_error = true;
-            }
-            update_status(*app, *mutex, status_msg, output_msg);
-        } catch (const std::exception& error) {
-            log_exception(error, "start_generate");
-            {
-                std::lock_guard<std::recursive_mutex> lock(*mutex);
-                app->has_error = true;
-            }
-            update_status(*app, *mutex, std::string("Error: ") + error.what());
-        }
-        mark_idle(*app, *mutex);
-    }).detach();
-}
-
-void start_lookup(
-    AppState snapshot,
-    const std::shared_ptr<AppState>& app,
-    const std::shared_ptr<std::recursive_mutex>& mutex) {
-    {
-        std::lock_guard<std::recursive_mutex> lock(*mutex);
-        if (app->busy) return;
-
-        std::string task_id = trim_spaces(snapshot.fields[4].value);
-        std::string save_path = trim_spaces(snapshot.fields[3].value);
-
-        if (task_id.empty()) {
-            app->status = "Error: Task ID lookup is required.";
-            log_error("Validation failed: Task ID is empty.");
-            app->has_error = true;
-            app->frame_dirty = true;
-            return;
-        }
-        if (save_path.empty()) {
-            app->status = "Error: Save Path is required.";
-            log_error("Validation failed: Save Path is empty.");
-            app->has_error = true;
-            app->frame_dirty = true;
-            return;
-        }
-
-        fs::path p(save_path);
-        std::error_code ec;
-        fs::path parent = p.parent_path();
-        bool is_dir = fs::is_directory(p, ec) || save_path.back() == '/' || save_path.back() == '\\';
-        if (is_dir) {
-            if (!p.empty() && !fs::exists(p, ec) && !fs::exists(p.parent_path(), ec)) {
-                app->status = "Error: Target directory does not exist.";
-                log_error("Validation failed: Target directory " + save_path + " does not exist.");
-                app->has_error = true;
-                app->frame_dirty = true;
-                return;
-            }
-        } else {
-            if (!parent.empty() && !fs::exists(parent, ec)) {
-                app->status = "Error: Target directory " + parent.string() + " does not exist.";
-                log_error("Validation failed: Parent directory " + parent.string() + " does not exist.");
-                app->has_error = true;
-                app->frame_dirty = true;
-                return;
-            }
-        }
-
-        app->busy = true;
-        app->status = "Checking task...";
-        app->output.clear();
-        app->has_error = false;
-    }
-
-    std::thread([snapshot, app, mutex]() {
-        try {
-            log_info("Starting lookup for task ID: " + snapshot.fields[4].value);
-            auto client = make_client(snapshot);
-            auto task = client.get_task(snapshot.fields[4].value);
-            
-            log_info("Lookup result for task " + task.id + ": Status=" + seedance2::to_string(task.status));
-            
-            if (task.status == seedance2::TaskStatus::Succeeded) {
-                std::string download_url = task.output_url.empty() ? (task.video_urls.empty() ? "" : task.video_urls[0]) : task.output_url;
-                if (!download_url.empty()) {
-                    std::string save_path_input = snapshot.fields[3].value;
-                    std::string target_file = resolve_target_file_path(save_path_input, download_url, task.id);
-                    
-                    log_info("Task succeeded. Starting download from " + download_url + " to " + target_file);
-                    update_status(*app, *mutex, "Downloading video to: " + target_file);
-                    
-                    std::string err;
-                    if (download_file(download_url, target_file, err)) {
-                        log_info("Successfully saved video to " + target_file);
-                        update_status(*app, *mutex, "Downloaded to " + target_file, output_summary(task));
-                    } else {
-                        log_error("Failed to download video: " + err);
-                        {
-                            std::lock_guard<std::recursive_mutex> lock(*mutex);
-                            app->has_error = true;
-                        }
-                        update_status(*app, *mutex, "Download failed: " + err, output_summary(task));
-                    }
-                } else {
-                    {
-                        std::lock_guard<std::recursive_mutex> lock(*mutex);
-                        app->has_error = true;
-                    }
-                    update_status(*app, *mutex, task_summary(task), output_summary(task));
-                }
-            } else {
-                {
-                    std::lock_guard<std::recursive_mutex> lock(*mutex);
-                    app->has_error = true;
-                }
-                update_status(*app, *mutex, task_summary(task), output_summary(task));
-            }
-        } catch (const seedance2::ApiException& error) {
-            log_exception(error, "start_lookup");
-            std::string status_msg = "Error: ApiException (status=" + std::to_string(error.http_status) + ", code=" + error.error.code + ")";
-            std::string output_msg = error.error.message;
-            if (!error.response_body.empty()) {
-                output_msg += "\n" + error.response_body;
-            }
-            {
-                std::lock_guard<std::recursive_mutex> lock(*mutex);
-                app->has_error = true;
-            }
-            update_status(*app, *mutex, status_msg, output_msg);
-        } catch (const std::exception& error) {
-            log_exception(error, "start_lookup");
-            {
-                std::lock_guard<std::recursive_mutex> lock(*mutex);
-                app->has_error = true;
-            }
-            update_status(*app, *mutex, std::string("Error: ") + error.what());
-        }
-        mark_idle(*app, *mutex);
-    }).detach();
+    
+    input.model_index = app.model;
+    input.resolution_index = app.resolution;
+    input.aspect_index = app.aspect;
+    input.duration = app.duration;
+    input.audio = app.audio;
+    input.watermark = app.watermark;
+    return input;
 }
 
 void click_button(
     int index,
     const std::shared_ptr<AppState>& app,
-    const std::shared_ptr<std::recursive_mutex>& mutex) {
+    const std::shared_ptr<std::recursive_mutex>& mutex,
+    const std::shared_ptr<JobController>& jobs) {
     if (index == 0) app->model = (app->model + 1) % 2;
     if (index == 1) app->resolution = (app->resolution + 1) % 4;
     if (index == 2) app->aspect = (app->aspect + 1) % 7;
@@ -3052,12 +2662,22 @@ void click_button(
     if (index == 5) app->audio = !app->audio;
     if (index == 6) app->watermark = !app->watermark;
     if (index == 7) open_file_browser(*app);
-    if (index == 8) start_generate(*app, app, mutex);
-    if (index == 9) start_lookup(*app, app, mutex);
+    if (index == 8) {
+        if (jobs) jobs->start_generate(make_scene_input(*app));
+    }
+    if (index == 9) {
+        if (jobs) jobs->start_lookup(make_scene_input(*app));
+    }
     if (index == 10) {
-        app->local_images.clear();
-        app->fields[2].value = local_references_display(app->local_images);
-        app->status = "Cleared attached local reference images.";
+        if (app->busy && jobs) {
+            jobs->cancel();
+        } else {
+            app->local_images.clear();
+            app->fields[2].value.clear();
+            app->fields[2].cursor = 0;
+            clear_selection(app->fields[2]);
+            app->status = "Cleared reference URLs.";
+        }
     }
 }
 
@@ -3366,6 +2986,11 @@ int run_gui() {
 
     auto mutex_state = std::make_shared<std::recursive_mutex>();
     std::recursive_mutex& mutex = *mutex_state;
+
+    auto transport = std::make_shared<AppStateTransport>(app_state);
+    auto service = std::make_shared<SeedanceService>(transport);
+    auto jobs = std::make_shared<JobController>(service, app_state, mutex_state);
+
     auto last_cursor_blink = std::chrono::steady_clock::now();
     redraw(x11, app);
     while (!app.should_close) {
@@ -3423,7 +3048,7 @@ int run_gui() {
                     }
                     for (std::size_t i = 0; i < app.buttons.size(); ++i) {
                         if (contains(app.buttons[i].rect, event.xbutton.x, event.xbutton.y)) {
-                            click_button(static_cast<int>(i), app_state, mutex_state);
+                            click_button(static_cast<int>(i), app_state, mutex_state, jobs);
                         }
                     }
                 } else {
