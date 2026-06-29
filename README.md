@@ -39,7 +39,7 @@ These defaults are based on BytePlus ModelArk API Explorer / docs for content ge
 Required:
 
 ```bash
-export BYTEPLUS_ARK_API_KEY="..."
+export BYTEPLUS_ARK_API_KEY="ark-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx-xxxxx"
 ```
 
 Fallback:
@@ -98,7 +98,7 @@ cmake --build build/HOSV --parallel
 ## Run
 
 ```bash
-export BYTEPLUS_ARK_API_KEY="..."
+export BYTEPLUS_ARK_API_KEY="ark-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx-xxxxx"
 ./dist/HOSV --provider byteplus-ark
 ```
 

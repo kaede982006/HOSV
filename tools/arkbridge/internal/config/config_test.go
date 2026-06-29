@@ -1,6 +1,13 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+func init() {
+	os.Setenv("HOSV_BASHRC_PATH", "skip")
+}
 
 func TestLoadFallbacks(t *testing.T) {
 	t.Setenv("BYTEPLUS_ARK_API_KEY", "")

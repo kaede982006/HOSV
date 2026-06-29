@@ -37,27 +37,18 @@ type Config struct {
 }
 
 func loadEnv() {
-	dir, err := os.Getwd()
-	if err != nil {
+	bashrcPath := os.Getenv("HOSV_BASHRC_PATH")
+	if bashrcPath == "skip" {
 		return
 	}
-	var envPath string
-	for i := 0; i < 4; i++ {
-		path := filepath.Join(dir, ".env")
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			envPath = path
-			break
+	if bashrcPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
+		bashrcPath = filepath.Join(home, ".bashrc")
 	}
-	if envPath == "" {
-		return
-	}
-	file, err := os.Open(envPath)
+	file, err := os.Open(bashrcPath)
 	if err != nil {
 		return
 	}
@@ -68,6 +59,12 @@ func loadEnv() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
+		}
+		if strings.HasPrefix(line, "export") {
+			rem := line[6:]
+			if len(rem) > 0 && (rem[0] == ' ' || rem[0] == '\t') {
+				line = strings.TrimSpace(rem)
+			}
 		}
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {

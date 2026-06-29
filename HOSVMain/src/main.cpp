@@ -2986,26 +2986,21 @@ void handle_key(X11& x11, XKeyEvent& event, AppState& app) {
 }
 
 void load_dotenv() {
-    const auto exe_dir = executable_dir();
-    const std::array<fs::path, 5> candidates = {
-        fs::current_path() / ".env",
-        exe_dir / ".env",
-        exe_dir.parent_path() / ".env",
-        fs::current_path() / ".." / ".env",
-        fs::current_path() / ".." / ".." / ".env",
-    };
-    fs::path env_path;
-    for (const auto& candidate : candidates) {
-        std::error_code ec;
-        if (fs::is_regular_file(candidate, ec)) {
-            env_path = candidate;
-            break;
+    const char* override_path = std::getenv("HOSV_BASHRC_PATH");
+    std::string bashrc_path;
+    if (override_path) {
+        if (std::string(override_path) == "skip") {
+            return;
         }
+        bashrc_path = override_path;
+    } else {
+        const char* home_dir = std::getenv("HOME");
+        if (!home_dir) {
+            return;
+        }
+        bashrc_path = (fs::path(home_dir) / ".bashrc").string();
     }
-    if (env_path.empty()) {
-        return;
-    }
-    std::ifstream file(env_path);
+    std::ifstream file(bashrc_path);
     if (!file.is_open()) {
         return;
     }
@@ -3018,17 +3013,34 @@ void load_dotenv() {
         if (start == std::string::npos || line[start] == '#') {
             continue;
         }
-        auto eq = line.find('=', start);
+        
+        std::string parsed_line = line.substr(start);
+        
+        // Strip "export" command prefix if present
+        if (parsed_line.rfind("export", 0) == 0) {
+            if (parsed_line.size() > 6 && (parsed_line[6] == ' ' || parsed_line[6] == '\t')) {
+                auto next_start = parsed_line.find_first_not_of(" \t", 6);
+                if (next_start != std::string::npos) {
+                    parsed_line = parsed_line.substr(next_start);
+                } else {
+                    continue;
+                }
+            }
+        }
+        
+        auto eq = parsed_line.find('=');
         if (eq == std::string::npos) {
             continue;
         }
-        std::string key = line.substr(start, eq - start);
+        std::string key = parsed_line.substr(0, eq);
         auto key_end = key.find_last_not_of(" \t");
         if (key_end != std::string::npos) {
             key = key.substr(0, key_end + 1);
+        } else {
+            key = "";
         }
         
-        std::string val = line.substr(eq + 1);
+        std::string val = parsed_line.substr(eq + 1);
         auto val_start = val.find_first_not_of(" \t");
         if (val_start != std::string::npos) {
             val = val.substr(val_start);

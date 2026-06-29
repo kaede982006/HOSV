@@ -3,9 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
+
+func init() {
+	os.Setenv("HOSV_BASHRC_PATH", "skip")
+}
 
 func TestSchemaDoesNotLeakSecrets(t *testing.T) {
 	t.Setenv("BYTEPLUS_ARK_API_KEY", "unit_test_key_that_must_not_be_printed")
