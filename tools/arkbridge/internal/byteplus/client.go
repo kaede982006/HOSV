@@ -3,12 +3,16 @@ package byteplus
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -67,6 +71,22 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (json.Ra
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
+	if c.cfg.Debug {
+		var reqBodyStr string
+		if body != nil {
+			payload, _ := json.Marshal(body)
+			reqBodyStr = string(payload)
+		}
+		keyLen := len(c.cfg.APIKey)
+		maskedKey := c.cfg.APIKey
+		if keyLen > 10 {
+			maskedKey = c.cfg.APIKey[:4] + "..." + c.cfg.APIKey[keyLen-4:]
+		}
+		fmt.Fprintf(os.Stderr, "[DEBUG] Request: %s %s\n", method, req.URL.String())
+		fmt.Fprintf(os.Stderr, "[DEBUG] Auth: Bearer %s (len=%d)\n", maskedKey, keyLen)
+		fmt.Fprintf(os.Stderr, "[DEBUG] Request Body: %s\n", reqBodyStr)
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, APIError{Code: "network_error", Message: logging.RedactText(err.Error()), Retryable: true}
@@ -77,6 +97,12 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (json.Ra
 	if err != nil {
 		return nil, APIError{Code: "network_error", Message: logging.RedactText(err.Error()), Retryable: true, StatusCode: resp.StatusCode}
 	}
+
+	if c.cfg.Debug {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Response Status: %d\n", resp.StatusCode)
+		fmt.Fprintf(os.Stderr, "[DEBUG] Response Body: %s\n", string(data))
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, mapHTTPError(resp.StatusCode, data)
 	}
@@ -144,12 +170,40 @@ func classifyBadRequest(text string) string {
 	}
 }
 
-func validateRemoteURL(value string) error {
+func normalizeMediaReference(value string) (string, error) {
 	parsed, err := url.Parse(value)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return errors.New("Official BytePlus video generation requires public or signed media URLs. Local file upload is not configured.")
+	if err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		return value, nil
 	}
-	return nil
+	if err == nil && parsed.Scheme == "data" {
+		return value, nil
+	}
+	if err == nil && parsed.Scheme == "file" {
+		value = parsed.Path
+	}
+	return localFileDataURL(value)
+}
+
+func localFileDataURL(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", errors.New("media reference must be a public URL, data URL, or readable local file")
+	}
+	if info.IsDir() {
+		return "", errors.New("media reference points to a directory, not a file")
+	}
+	if info.Size() > 64<<20 {
+		return "", errors.New("local media file is too large for inline upload; use a hosted or signed URL")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", errors.New("failed to read local media file")
+	}
+	mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if mimeType == "" {
+		mimeType = http.DetectContentType(data)
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 }
 
 func errorResponse(err error) bridge.Response {

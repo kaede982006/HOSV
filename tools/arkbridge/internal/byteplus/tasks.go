@@ -121,22 +121,25 @@ func selectModel(defaultModel, fastModel string, req bridge.CreateRequest) strin
 func buildContent(req bridge.CreateRequest) ([]contentPart, error) {
 	content := []contentPart{{Type: "text", Text: req.Prompt}}
 	for _, image := range req.ImageURLs {
-		if err := validateRemoteURL(image); err != nil {
+		normalized, err := normalizeMediaReference(image)
+		if err != nil {
 			return nil, APIError{Code: "invalid_media_url", Message: err.Error()}
 		}
-		content = append(content, contentPart{Type: "image_url", ImageURL: &imageURLObject{URL: image}})
+		content = append(content, contentPart{Type: "image_url", ImageURL: &imageURLObject{URL: normalized}})
 	}
 	for _, video := range req.VideoURLs {
-		if err := validateRemoteURL(video); err != nil {
+		normalized, err := normalizeMediaReference(video)
+		if err != nil {
 			return nil, APIError{Code: "invalid_media_url", Message: err.Error()}
 		}
-		content = append(content, contentPart{Type: "video_url", VideoURL: &urlObject{URL: video}})
+		content = append(content, contentPart{Type: "video_url", VideoURL: &urlObject{URL: normalized}})
 	}
 	for _, audio := range req.AudioURLs {
-		if err := validateRemoteURL(audio); err != nil {
+		normalized, err := normalizeMediaReference(audio)
+		if err != nil {
 			return nil, APIError{Code: "invalid_media_url", Message: err.Error()}
 		}
-		content = append(content, contentPart{Type: "audio_url", AudioURL: &urlObject{URL: audio}})
+		content = append(content, contentPart{Type: "audio_url", AudioURL: &urlObject{URL: normalized}})
 	}
 	return content, nil
 }

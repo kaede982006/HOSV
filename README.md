@@ -63,7 +63,7 @@ export BYTEPLUS_ARK_DEBUG=false
 export BYTEPLUS_ARK_BRIDGE_PATH="./arkbridge"
 ```
 
-Media references must be public or signed `http://` / `https://` URLs. Local media uploads are not configured yet and local paths are rejected before any API call.
+The GUI can attach local image paths through the file browser. `arkbridge` converts readable local media files to inline `data:` URLs before calling BytePlus. Public or signed `http://` / `https://` media URLs are still preferred for large files.
 
 ## Build
 

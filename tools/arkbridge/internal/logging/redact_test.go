@@ -53,4 +53,13 @@ func TestRedactText(t *testing.T) {
 			t.Fatalf("redacted text missing %q in %q", want, got)
 		}
 	}
+
+	// Verify request ID is preserved
+	reqIdInput := "Error: the API key or AK/SK in the request is missing or invalid. request id: 20260629083329bc0195d8200632bfa8"
+	reqIdGot := RedactText(reqIdInput)
+	expectedReqIdPart := "request id: 20260629083329bc0195d8200632bfa8"
+	if !strings.Contains(reqIdGot, expectedReqIdPart) {
+		t.Fatalf("request ID was incorrectly redacted: got %q, expected to contain %q", reqIdGot, expectedReqIdPart)
+	}
 }
+

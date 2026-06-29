@@ -1,9 +1,12 @@
 package config
 
 import (
+	"bufio"
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -33,7 +36,56 @@ type Config struct {
 	APIKeyVarName string
 }
 
+func loadEnv() {
+	dir, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	var envPath string
+	for i := 0; i < 4; i++ {
+		path := filepath.Join(dir, ".env")
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			envPath = path
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	if envPath == "" {
+		return
+	}
+	file, err := os.Open(envPath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		if len(val) >= 2 && ((val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'')) {
+			val = val[1 : len(val)-1]
+		}
+		if key != "" && os.Getenv(key) == "" {
+			os.Setenv(key, val)
+		}
+	}
+}
+
 func Load() Config {
+	loadEnv()
 	keyVar := "BYTEPLUS_ARK_API_KEY"
 	key := os.Getenv(keyVar)
 	if key == "" {

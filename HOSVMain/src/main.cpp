@@ -873,10 +873,6 @@ constexpr int BOTTOM_MARGIN = 28;
 } // namespace LayoutConsts
 
 namespace {
-bool is_remote_reference_url(const std::string& value) {
-    return value.rfind("http://", 0) == 0 || value.rfind("https://", 0) == 0;
-}
-
 std::vector<std::string> split_reference_values(const std::string& input) {
     std::vector<std::string> values;
     std::stringstream ss(input);
@@ -897,9 +893,6 @@ std::vector<std::string> split_reference_values(const std::string& input) {
 std::vector<std::string> parse_reference_urls(const std::string& input) {
     std::vector<std::string> urls;
     for (const auto& value : split_reference_values(input)) {
-        if (!is_remote_reference_url(value)) {
-            throw std::invalid_argument("Reference inputs must be remote http:// or https:// URLs. Local files are not uploaded by HOSV yet.");
-        }
         if (std::find(urls.begin(), urls.end(), value) == urls.end()) {
             urls.push_back(value);
         }
@@ -1425,7 +1418,13 @@ void file_browser_activate_selection(AppState& app) {
         return;
     }
 
-    app.status = "Local image files are not uploaded yet. Paste an http:// or https:// image URL instead.";
+    if (std::find(app.reference_urls.begin(), app.reference_urls.end(), entry.path) == app.reference_urls.end()) {
+        app.reference_urls.push_back(entry.path);
+    }
+    app.fields[2].value = reference_urls_display(app.reference_urls);
+    app.fields[2].cursor = static_cast<int>(app.fields[2].value.size());
+    clear_selection(app.fields[2]);
+    app.status = "Attached local reference image. Rendering still requires public URLs until upload support is configured.";
     app.file_browser_open = false;
 }
 
@@ -1522,7 +1521,7 @@ void layout_render_controls(AppState& app, Layout& L, int panel_x, int panel_y, 
 
     rc.metadata_y = row2_y + LayoutConsts::BUTTON_H + LayoutConsts::METADATA_TOP_GAP;
     const int metadata_baseline = rc.metadata_y + LayoutConsts::FIELD_LABEL_GAP;
-    constexpr const char* attached_label = "Reference URLs";
+    constexpr const char* attached_label = "References";
 
     rc.attached_label_x = control_x;
     rc.attached_label_y = metadata_baseline;
@@ -1583,7 +1582,7 @@ void set_layout(AppState& app) {
     app.fields[1].secret = false;
     content_y = app.fields[1].rect.y + app.fields[1].rect.h + LayoutConsts::ROW_GAP + LayoutConsts::REFERENCE_SECTION_GAP;
 
-    app.fields[2].label = "Reference Image URLs";
+    app.fields[2].label = "Reference Images / URLs";
     app.fields[2].label_y = content_y + LayoutConsts::FIELD_LABEL_GAP;
     const int attach_w = 110;
     const int cancel_w = 60;
@@ -1601,7 +1600,7 @@ void set_layout(AppState& app) {
     app.buttons.resize(11);
     layout_render_controls(app, L, comp_x, render_y, comp_w);
     L.render_panel.h = column_h - (render_y - L.side_y);
-    app.buttons[7] = {"Use URL", {field_x + reference_w + gap, app.fields[2].rect.y, attach_w, LayoutConsts::REFERENCE_FIELD_H}};
+    app.buttons[7] = {"Add File", {field_x + reference_w + gap, app.fields[2].rect.y, attach_w, LayoutConsts::REFERENCE_FIELD_H}};
     app.buttons[10] = {"Cancel", {field_x + reference_w + gap + attach_w + btn_gap, app.fields[2].rect.y, cancel_w, LayoutConsts::REFERENCE_FIELD_H}};
 
     L.studio_panel = {L.side_x, L.side_y, L.side_w, column_h};
@@ -1785,15 +1784,8 @@ int run_self_tests() {
     }
 
     {
-        const auto refs = parse_reference_urls("https://cdn.example/a.png, https://cdn.example/a.png\nhttp://cdn.example/b.mp4");
-        test.check(refs.size() == 2, "reference URL parser splits and deduplicates remote URLs", stderr);
-        bool rejected_local_path = false;
-        try {
-            (void)parse_reference_urls("/tmp/local.png");
-        } catch (const std::invalid_argument&) {
-            rejected_local_path = true;
-        }
-        test.check(rejected_local_path, "reference URL parser rejects local file paths", stderr);
+        const auto refs = parse_reference_urls("https://cdn.example/a.png, https://cdn.example/a.png\n/tmp/local.png");
+        test.check(refs.size() == 2, "reference parser splits and deduplicates URLs and local paths", stderr);
     }
 
     {
@@ -1824,8 +1816,8 @@ int run_self_tests() {
         app.file_cursor = 0;
         load_file_entries(app);
         file_browser_activate_selection(app);
-        test.check(app.reference_urls.empty(), "file browser does not attach local image paths", stderr);
-        test.check(app.fields[2].value.empty(), "reference URL field ignores local file selection", stderr);
+        test.check(app.reference_urls.size() == 1 && app.reference_urls[0].find("visible.png") != std::string::npos, "file browser attaches local image paths", stderr);
+        test.check(app.fields[2].value.find("visible.png") != std::string::npos, "reference field displays local file selection", stderr);
         test.check(!app.file_browser_open, "file browser closes after image selection", stderr);
 
         fs::remove_all(temp_dir, ec);
@@ -2494,9 +2486,9 @@ void draw_file_browser(X11& x11, AppState& app) {
     draw_box(x11, dialog, x11.accent, false);
 
     set_foreground(x11, x11.ink);
-    draw_string(x11, dialog.x + 18, dialog.y + 34, "Local Images Unsupported", FontRole::Title);
+    draw_string(x11, dialog.x + 18, dialog.y + 34, "Add Reference Image", FontRole::Title);
     set_foreground(x11, x11.muted);
-    draw_string(x11, dialog.x + 18, dialog.y + 60, "Paste a hosted http:// or https:// image URL in the reference field.", FontRole::Small);
+    draw_string(x11, dialog.x + 18, dialog.y + 60, "Select a local image to attach, or paste a hosted URL in the reference field.", FontRole::Small);
     draw_string(x11, dialog.x + dialog.w - 430, dialog.y + 60, "h parent  j/k move  l open  Ctrl+H hidden  Esc cancel", FontRole::Small);
 
     const Rect cancel_btn{dialog.x + dialog.w - 90, dialog.y + 16, 72, 28};
@@ -2579,7 +2571,7 @@ void redraw(X11& x11, AppState& app) {
         draw_field_frame(x11, field.rect, focused, field.readonly);
         if (field.readonly && field.value.empty()) {
             set_foreground(x11, x11.muted);
-            draw_string(x11, field.rect.x + 10, field_text_top(field), "Paste one or more remote reference URLs.", FontRole::Small);
+            draw_string(x11, field.rect.x + 10, field_text_top(field), "Add local images or paste reference URLs.", FontRole::Small);
         } else {
             draw_box(x11, {field.rect.x + 1, field.rect.y + 1, field.rect.w - 2, field.rect.h - 2}, x11.surface, true);
             set_foreground(x11, field.readonly ? x11.muted : x11.ink);
@@ -2622,15 +2614,15 @@ void redraw(X11& x11, AppState& app) {
     options << "Duration: " << app.duration << " seconds";
     const auto& rc = L.render_controls;
     set_foreground(x11, x11.muted);
-    draw_string(x11, rc.attached_label_x, rc.attached_label_y, "Reference URLs", FontRole::Label);
+    draw_string(x11, rc.attached_label_x, rc.attached_label_y, "References", FontRole::Label);
     const auto entered_refs = split_reference_values(app.fields.size() > 2 ? app.fields[2].value : std::string{});
     set_foreground(x11, entered_refs.empty() ? x11.muted : x11.warning);
     if (entered_refs.empty()) {
-        draw_string(x11, rc.attached_value_x, rc.attached_value_y, "None entered.", FontRole::Body);
+        draw_string(x11, rc.attached_value_x, rc.attached_value_y, "None attached.", FontRole::Body);
     } else {
         const auto& last = entered_refs.back();
         std::ostringstream attached;
-        attached << entered_refs.size() << " entered, latest: " << (last.size() > 36 ? "..." + last.substr(last.size() - 33) : last);
+        attached << entered_refs.size() << " attached, latest: " << (last.size() > 36 ? "..." + last.substr(last.size() - 33) : last);
         draw_string(x11, rc.attached_value_x, rc.attached_value_y, attached.str(), FontRole::Body);
     }
     set_foreground(x11, x11.ink);
@@ -2701,10 +2693,8 @@ void click_button(
     if (index == 5) app->audio = !app->audio;
     if (index == 6) app->watermark = !app->watermark;
     if (index == 7) {
-        app->focus = 2;
-        app->fields[2].cursor = static_cast<int>(app->fields[2].value.size());
-        clear_selection(app->fields[2]);
-        app->status = "Paste remote http:// or https:// reference URLs. Local file upload is not supported yet.";
+        open_file_browser(*app);
+        app->status = "Select a local image file to attach.";
     }
     if (index == 8) {
         if (jobs) {
@@ -2995,6 +2985,78 @@ void handle_key(X11& x11, XKeyEvent& event, AppState& app) {
     }
 }
 
+void load_dotenv() {
+    const auto exe_dir = executable_dir();
+    const std::array<fs::path, 5> candidates = {
+        fs::current_path() / ".env",
+        exe_dir / ".env",
+        exe_dir.parent_path() / ".env",
+        fs::current_path() / ".." / ".env",
+        fs::current_path() / ".." / ".." / ".env",
+    };
+    fs::path env_path;
+    for (const auto& candidate : candidates) {
+        std::error_code ec;
+        if (fs::is_regular_file(candidate, ec)) {
+            env_path = candidate;
+            break;
+        }
+    }
+    if (env_path.empty()) {
+        return;
+    }
+    std::ifstream file(env_path);
+    if (!file.is_open()) {
+        return;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        auto start = line.find_first_not_of(" \t");
+        if (start == std::string::npos || line[start] == '#') {
+            continue;
+        }
+        auto eq = line.find('=', start);
+        if (eq == std::string::npos) {
+            continue;
+        }
+        std::string key = line.substr(start, eq - start);
+        auto key_end = key.find_last_not_of(" \t");
+        if (key_end != std::string::npos) {
+            key = key.substr(0, key_end + 1);
+        }
+        
+        std::string val = line.substr(eq + 1);
+        auto val_start = val.find_first_not_of(" \t");
+        if (val_start != std::string::npos) {
+            val = val.substr(val_start);
+        } else {
+            val = "";
+        }
+        auto val_end = val.find_last_not_of(" \t");
+        if (val_end != std::string::npos) {
+            val = val.substr(0, val_end + 1);
+        } else {
+            val = "";
+        }
+        
+        if (val.size() >= 2 && (
+            (val.front() == '"' && val.back() == '"') ||
+            (val.front() == '\'' && val.back() == '\'')
+        )) {
+            val = val.substr(1, val.size() - 2);
+        }
+        
+        if (!key.empty()) {
+            if (std::getenv(key.c_str()) == nullptr) {
+                setenv(key.c_str(), val.c_str(), 1);
+            }
+        }
+    }
+}
+
 int run_gui() {
     X11 x11;
     auto app_state = std::make_shared<AppState>();
@@ -3152,6 +3214,7 @@ int run_gui() {
 } // namespace
 
 int main(int argc, char** argv) {
+    load_dotenv();
     std::string provider = "byteplus-ark";
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];

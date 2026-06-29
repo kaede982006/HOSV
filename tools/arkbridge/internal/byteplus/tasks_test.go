@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,11 +136,34 @@ func TestBuildCreatePayloadVariants(t *testing.T) {
 	}
 }
 
-func TestInvalidMediaURL(t *testing.T) {
+func TestMissingLocalMediaPathRejected(t *testing.T) {
 	c := New(config.Config{Model: "m"}, nil)
-	_, err := c.BuildCreatePayload(bridge.CreateRequest{Prompt: "hello", ImageURLs: []string{"/tmp/a.png"}})
+	_, err := c.BuildCreatePayload(bridge.CreateRequest{Prompt: "hello", ImageURLs: []string{"/tmp/hosv-missing-local-media.png"}})
 	if err == nil {
-		t.Fatalf("expected invalid media url")
+		t.Fatalf("expected invalid media path")
+	}
+}
+
+func TestLocalImageMediaPathIsInlined(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "reference.png")
+	if err := os.WriteFile(path, []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := New(config.Config{Model: "m"}, nil)
+	payload, err := c.BuildCreatePayload(bridge.CreateRequest{
+		Mode:      "image_to_video",
+		Prompt:    "hello",
+		ImageURLs: []string{path},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Content) != 2 || payload.Content[1].ImageURL == nil {
+		t.Fatalf("bad content: %#v", payload.Content)
+	}
+	if !strings.HasPrefix(payload.Content[1].ImageURL.URL, "data:image/png;base64,") {
+		t.Fatalf("local image was not converted to data URL: %q", payload.Content[1].ImageURL.URL)
 	}
 }
 

@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -10,6 +11,7 @@ var (
 	envKeyPattern     = regexp.MustCompile(`(?i)\b(BYTEPLUS_ARK_API_KEY|ARK_API_KEY)=([^\s"'` + "`" + `]+)`)
 	skPattern         = regexp.MustCompile(`\bsk_(live|test)_[A-Za-z0-9_]{8,}`)
 	longTokenPattern  = regexp.MustCompile(`\b[A-Za-z0-9._~+/\-=]{32,}\b`)
+	requestIDPattern  = regexp.MustCompile(`(?i)\b(request[-_ ]?id:\s*)([A-Za-z0-9._~+/\-=]+)`)
 )
 
 func RedactSecret(value string) string {
@@ -48,6 +50,18 @@ func RedactText(value string) string {
 	if value == "" {
 		return ""
 	}
+
+	// Protect request IDs from being redacted
+	reqIDs := []string{}
+	value = requestIDPattern.ReplaceAllStringFunc(value, func(match string) string {
+		submatches := requestIDPattern.FindStringSubmatch(match)
+		if len(submatches) == 3 {
+			reqIDs = append(reqIDs, submatches[2])
+			return submatches[1] + fmt.Sprintf("__REQ_ID_PLACEHOLDER_%d__", len(reqIDs)-1)
+		}
+		return match
+	})
+
 	value = authBearerPattern.ReplaceAllString(value, "Authorization: Bearer ****")
 	value = envKeyPattern.ReplaceAllString(value, "$1=****")
 	value = skPattern.ReplaceAllStringFunc(value, RedactSecret)
@@ -57,5 +71,13 @@ func RedactText(value string) string {
 		}
 		return RedactSecret(token)
 	})
+
+	// Restore protected request IDs
+	for i, reqID := range reqIDs {
+		placeholder := fmt.Sprintf("__REQ_ID_PLACEHOLDER_%d__", i)
+		value = strings.Replace(value, placeholder, reqID, 1)
+	}
+
 	return value
 }
+
